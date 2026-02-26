@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER:-factory_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-factory_password}
+      POSTGRES_DB: ${DB_NAME:-factorysense}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - factory_network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+
+  web:
+    build: .
+    image: factorysenseai-app
+    restart: always
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-factory_user}:${DB_PASSWORD:-factory_password}@db/${DB_NAME:-factorysense}
+      - SECRET_KEY=${SECRET_KEY}
+      - ALGORITHM=HS256
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - factory_network
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 1G
+
+networks:
+  factory_network:
+    driver: bridge
+
+volumes:
+  postgres_data:

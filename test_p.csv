@@ -1,0 +1,2 @@
+timestamp,mill_id,machine_id,current_A,motor_state
+2026-02-25T18:00:00Z,VERIFY,M1,10.5,RUNNING
