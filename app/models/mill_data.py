@@ -10,9 +10,9 @@ class BearingRisk(str, enum.Enum):
     HIGH = "HIGH"
 
 class AlertType(str, enum.Enum):
-    HIGH_LOAD = "high_load"
     DATA_GAP = "data_gap"
     WARNING = "warning"
+    CO2_INCREASE = "co2_increase"
 
 class RawFile(Base):
     __tablename__ = "raw_files"
@@ -44,8 +44,6 @@ class MachineDailyStats(Base):
     run_hours = Column(Float, nullable=False)
     # New fields for machine metrics
     avg_current = Column(Float, nullable=True)
-    max_current = Column(Float, nullable=True)
-    load_ratio = Column(Float, nullable=True)
 
 class MachineDataPoint(Base):
     __tablename__ = "machine_data_points"

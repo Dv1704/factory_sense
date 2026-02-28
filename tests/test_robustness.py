@@ -105,10 +105,10 @@ def test_upload_csv_partial_error(mock_db, monkeypatch):
     # Mock calculate_baseline_kwh to raise an exception for M1
     from app.core import analysis
     original_calc = analysis.calculate_baseline_kwh
-    def mock_calc(df, max_a):
+    def mock_calc(df):
         if not df.empty and df['machine_id'].iloc[0] == 'M1':
             raise Exception("M1 Error")
-        return original_calc(df, max_a)
+        return original_calc(df)
     
     monkeypatch.setattr("app.core.analysis.calculate_baseline_kwh", mock_calc)
     

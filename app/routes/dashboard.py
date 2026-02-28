@@ -18,8 +18,9 @@ async def get_machine_specs(
     db: AsyncSession = Depends(get_db)
 ):
     """Returns the safety thresholds and metadata for all machines."""
-    await get_api_key_user(x_api_key, db)
-    return MACHINE_SPECS
+    # Remove max_a from specs before returning
+    clean_specs = {k: {"name": v["name"]} for k, v in MACHINE_SPECS.items()}
+    return clean_specs
 
 @router.get("/summary")
 async def get_dashboard_summary(
@@ -99,12 +100,8 @@ async def get_machines(
     
     machines = []
     for s in all_stats:
-        # Status logic: if bearing risk is HIGH or max_current > threshold, it's warning
-        spec = MACHINE_SPECS.get(s.machine_id, {"max_a": 25.0})
         status = "normal"
-        if s.bearing_risk == BearingRisk.HIGH or (s.max_current and s.max_current > spec["max_a"]):
-            status = "high_load"
-        elif s.bearing_risk == BearingRisk.WARNING:
+        if s.bearing_risk == BearingRisk.WARNING or s.bearing_risk == BearingRisk.HIGH:
             status = "warning"
 
         machines.append({
@@ -112,8 +109,6 @@ async def get_machines(
             "energy_consumption": round(s.total_energy_kwh, 2),
             "carbon_emissions": round(s.total_co2_kg, 2),
             "avg_current": round(s.avg_current, 2) if s.avg_current else 0,
-            "max_current": round(s.max_current, 2) if s.max_current else 0,
-            "load_ratio": round(s.load_ratio, 1) if s.load_ratio else 0,
             "status": status
         })
     

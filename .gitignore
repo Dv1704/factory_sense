@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+.env
+
+# Data & Logs
+*.csv
+data/
+*.log
+uvicorn_out.log
+
+# IDE
+.vscode/
+.idea/

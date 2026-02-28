@@ -8,7 +8,7 @@ import io
 import gzip
 import shutil
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from app.core.database import get_db
 from app.models.user import User
@@ -27,20 +27,20 @@ async def check_db_connection(db: AsyncSession) -> bool:
         return False
 
 MACHINE_SPECS = {
-    "1BK1": {"name": "1st Break Roll", "max_a": 25.0},
-    "1BK2": {"name": "1st Break Roll", "max_a": 25.0},
-    "2BK1": {"name": "2nd Break Roll", "max_a": 25.0},
-    "2BK2": {"name": "2nd Break Roll", "max_a": 25.0},
-    "AF1": {"name": "1st Scratch Roll", "max_a": 25.0},
-    "AF2": {"name": "2nd Scratch Roll", "max_a": 25.0},
-    "AC1": {"name": "1st Coarse Roll", "max_a": 25.0},
-    "AC2": {"name": "2nd Coarse Roll", "max_a": 25.0},
-    "3BK_C": {"name": "3rd Break Roll (Coarse)", "max_a": 20.0},
-    "3BK_F": {"name": "3rd Break Roll (Fine)", "max_a": 20.0},
-    "X": {"name": "X-Roll", "max_a": 20.0},
-    "5BK": {"name": "5th Break Roll", "max_a": 18.0},
-    "4BK_F": {"name": "4th Break Roll (Fine)", "max_a": 14.0},
-    "4BK_C": {"name": "4th Break Roll (Coarse)", "max_a": 28.0},
+    "1BK1": {"name": "1st Break Roll"},
+    "1BK2": {"name": "1st Break Roll"},
+    "2BK1": {"name": "2nd Break Roll"},
+    "2BK2": {"name": "2nd Break Roll"},
+    "AF1": {"name": "1st Scratch Roll"},
+    "AF2": {"name": "2nd Scratch Roll"},
+    "AC1": {"name": "1st Coarse Roll"},
+    "AC2": {"name": "2nd Coarse Roll"},
+    "3BK_C": {"name": "3rd Break Roll (Coarse)"},
+    "3BK_F": {"name": "3rd Break Roll (Fine)"},
+    "X": {"name": "X-Roll"},
+    "5BK": {"name": "5th Break Roll"},
+    "4BK_F": {"name": "4th Break Roll (Fine)"},
+    "4BK_C": {"name": "4th Break Roll (Coarse)"},
 }
 
 async def get_api_key_user(x_api_key: str = Header(...), db: AsyncSession = Depends(get_db)):
@@ -54,7 +54,7 @@ async def insert_data_points_task(data_points: List[dict], db_factory):
     """Background task to insert raw data points in chunks."""
     if not data_points:
         return
-    chunk_size = 5000
+    chunk_size = 500
     for i in range(0, len(data_points), chunk_size):
         chunk = data_points[i:i + chunk_size]
         try:
@@ -119,69 +119,135 @@ async def upload_csv(
     
     data_points = df.to_dict('records')
 
-    file_date = df['timestamp'].dt.date.iloc[0]
+    # Ensure 'date' column for grouping
+    df['date'] = df['timestamp'].dt.date
+    dates_in_file = sorted(df['date'].unique().tolist())
     machines = df['machine_id'].unique().tolist()
     
-    # Pre-fetch history for risk analysis (optimized to avoid OOM)
+    # 1. Batch fetch history for all machines (using specific query for efficiency)
     history_map = {}
-    for machine_id in machines:
-        try:
-            h_result = await db.execute(
-                select(MachineDataPoint.current_A)
-                .where(MachineDataPoint.machine_id == machine_id)
-                .order_by(MachineDataPoint.timestamp.desc())
-                .limit(1440)
-            )
-            history_map[machine_id] = h_result.scalars().all()
-        except Exception as e:
-            print(f"Error pre-fetching history for machine {machine_id}: {e}")
-            history_map[machine_id] = []
+    try:
+        h_result = await db.execute(
+            select(MachineDataPoint.machine_id, MachineDataPoint.current_A)
+            .where(MachineDataPoint.machine_id.in_(machines))
+            .order_by(MachineDataPoint.machine_id, MachineDataPoint.timestamp.desc())
+        )
+        temp_history = {}
+        for row in h_result.all():
+            m_id, val = row[0], row[1]
+            if m_id not in temp_history:
+                temp_history[m_id] = []
+            if len(temp_history[m_id]) < 1440:
+                temp_history[m_id].append(val)
+        history_map = temp_history
+    except Exception as e:
+        print(f"Error pre-fetching history: {e}")
 
+    # 2. Batch fetch ALL relevant stats (dates in file + their previous days)
+    try:
+        all_relevant_dates = set(dates_in_file)
+        for d in dates_in_file:
+            all_relevant_dates.add(d - timedelta(days=1))
+            
+        stats_result = await db.execute(
+            select(MachineDailyStats)
+            .where(
+                MachineDailyStats.mill_id == user.mill_id,
+                MachineDailyStats.machine_id.in_(machines),
+                MachineDailyStats.date.in_(list(all_relevant_dates))
+            )
+        )
+        all_stats = stats_result.scalars().all()
+        # stats_map format: {(machine_id, date): stats_obj}
+        stats_map = {(s.machine_id, s.date): s for s in all_stats}
+        
+        # 3. Batch check for existing alerts for all machines
+        existing_alerts_res = await db.execute(
+            select(Alert.machine_id, Alert.timestamp)
+            .where(
+                Alert.mill_id == user.mill_id,
+                Alert.machine_id.in_(machines),
+                Alert.type == AlertType.CO2_INCREASE
+            )
+        )
+        # alert_set format: {(machine_id, date)}
+        existing_alert_set = set()
+        for row in existing_alerts_res.all():
+            m_id, ts = row[0], row[1]
+            existing_alert_set.add((m_id, ts.date()))
+    except Exception as e:
+        print(f"Error fetching batch metadata: {e}")
+        stats_map, existing_alert_set = {}, set()
+
+    # 4. Vectorized processing by grouping (date, machine_id)
     processing_errors = []
     processed_count = 0
-    for machine_id in machines:
-        try:
-            m_df = df[df['machine_id'] == machine_id]
-            spec = MACHINE_SPECS.get(machine_id, {"max_a": 25.0})
+    
+    try:
+        # Calculate base metrics for all combinations at once
+        agg_df = df.groupby(['date', 'machine_id']).agg(
+            total_kwh=('energy_kwh', 'sum'),
+            total_co2=('co2_kg', 'sum'),
+            avg_current=('current_A', 'mean'),
+            run_count=('motor_state', lambda x: (x == 'RUNNING').sum())
+        ).reset_index()
+        agg_df['run_hours'] = agg_df['run_count'] / 60.0
+        
+        for _, agg_row in agg_df.iterrows():
+            curr_date = agg_row['date']
+            m_id = agg_row['machine_id']
+            m_df = df[(df['date'] == curr_date) & (df['machine_id'] == m_id)]
             
-            total_kwh = m_df['energy_kwh'].sum()
-            total_co2 = m_df['co2_kg'].sum()
-            run_hours = len(m_df[m_df['motor_state'] == 'RUNNING']) / 60.0
-            
-            baseline_kwh = analysis.calculate_baseline_kwh(m_df, spec["max_a"])
+            baseline_kwh = analysis.calculate_baseline_kwh(m_df)
             running_mask = m_df['motor_state'] == 'RUNNING'
             excess_kwh_sum = (m_df.loc[running_mask, 'energy_kwh'] - baseline_kwh).clip(lower=0).sum()
             excess_co2_sum = excess_kwh_sum * EF
             
-            combined_history = (m_df['current_A'].tolist() + history_map.get(machine_id, []))[:1440]
-            risk = analysis.assess_bearing_risk(combined_history, spec["max_a"])
-            health_score = analysis.calculate_health_score_refined(excess_co2_sum, total_co2, risk)
+            combined_history = (m_df['current_A'].tolist() + history_map.get(m_id, []))[:1440]
+            risk = analysis.assess_bearing_risk(combined_history)
             
-            stats = MachineDailyStats(
-                date=file_date, mill_id=user.mill_id, machine_id=machine_id,
-                total_energy_kwh=total_kwh, baseline_kwh=baseline_kwh, excess_kwh=excess_kwh_sum,
-                total_co2_kg=total_co2, excess_co2_kg=excess_co2_sum,
-                bearing_risk=risk, health_score=health_score, run_hours=run_hours,
-                avg_current=m_df['current_A'].mean(),
-                max_current=m_df['current_A'].max(),
-                load_ratio=(m_df['current_A'].mean() / spec["max_a"]) * 100 if spec["max_a"] > 0 else 0
-            )
-            db.add(stats)
-            
-            # Identify Alerts: Check if max_current exceeds safety threshold
-            if stats.max_current > spec["max_a"]:
-                alert = Alert(
-                    mill_id=user.mill_id,
-                    machine_id=machine_id,
-                    type=AlertType.HIGH_LOAD,
-                    message=f"Machine {machine_id} exceeded safety threshold: {stats.max_current}A > {spec['max_a']}A"
+            # Upsert using pre-fetched map
+            stats = stats_map.get((m_id, curr_date))
+            if stats:
+                stats.total_energy_kwh += float(agg_row['total_kwh'])
+                stats.total_co2_kg += float(agg_row['total_co2'])
+                stats.run_hours += float(agg_row['run_hours'])
+                stats.excess_kwh += float(excess_kwh_sum)
+                stats.excess_co2_kg += float(excess_co2_sum)
+                stats.avg_current = (stats.avg_current + float(agg_row['avg_current'])) / 2
+                stats.health_score = analysis.calculate_health_score_refined(stats.excess_co2_kg, stats.total_co2_kg, stats.bearing_risk)
+            else:
+                health_score = analysis.calculate_health_score_refined(excess_co2_sum, float(agg_row['total_co2']), risk)
+                stats = MachineDailyStats(
+                    date=curr_date, mill_id=user.mill_id, machine_id=m_id,
+                    total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh, excess_kwh=float(excess_kwh_sum),
+                    total_co2_kg=float(agg_row['total_co2']), excess_co2_kg=float(excess_co2_sum),
+                    bearing_risk=risk, health_score=health_score, run_hours=float(agg_row['run_hours']),
+                    avg_current=float(agg_row['avg_current'])
                 )
-                db.add(alert)
+                db.add(stats)
+                stats_map[(m_id, curr_date)] = stats # Update map for potential multi-file overlap (unlikely here but safe)
+            
+            # CO2 Increase Check
+            prev_date = curr_date - timedelta(days=1)
+            prev_stats = stats_map.get((m_id, prev_date))
+            if prev_stats and prev_stats.total_co2_kg > 0:
+                increase_pct = ((stats.total_co2_kg - prev_stats.total_co2_kg) / prev_stats.total_co2_kg) * 100
+                if increase_pct > 5.0 and (m_id, curr_date) not in existing_alert_set:
+                    alert = Alert(
+                        mill_id=user.mill_id,
+                        machine_id=m_id,
+                        type=AlertType.CO2_INCREASE,
+                        message=f"Machine {m_id} CO2 increased by {increase_pct:.1f}% compared to previous day"
+                    )
+                    db.add(alert)
+                    existing_alert_set.add((m_id, curr_date))
+
             processed_count += 1
-        except Exception as e:
-            msg = f"Error processing machine {machine_id}: {str(e)}"
-            print(msg)
-            processing_errors.append(msg)
+    except Exception as e:
+        msg = f"Error processing grouping: {str(e)}"
+        print(msg)
+        processing_errors.append(msg)
 
     raw_file = RawFile(mill_id=user.mill_id, filename=file.filename, status="PROCESSED")
     db.add(raw_file)

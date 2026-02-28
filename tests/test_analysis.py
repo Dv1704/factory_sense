@@ -14,10 +14,10 @@ def test_calculate_baseline_kwh():
     df = pd.DataFrame(data)
     # Quantile 0.20 of [10, 11, 12, 13, 14] is 10.8 (interpolation)
     expected = pd.Series([10.0, 11.0, 12.0, 13.0, 14.0]).quantile(0.20)
-    assert analysis.calculate_baseline_kwh(df, 25.0) == expected
+    assert analysis.calculate_baseline_kwh(df) == expected
 
     # Test empty
-    assert analysis.calculate_baseline_kwh(pd.DataFrame(), 25.0) == 0.0
+    assert analysis.calculate_baseline_kwh(pd.DataFrame()) == 0.0
 
 def test_calculate_excess_metrics():
     # excess_kwh = max(0, 10 - 8) = 2
@@ -27,12 +27,8 @@ def test_calculate_excess_metrics():
     assert abs(co2 - 0.466) < 0.0001
 
 def test_assess_bearing_risk():
-    # 90 > 0.85 * 100 (85) -> HIGH
-    risk = analysis.assess_bearing_risk([90.0] * 1440, 100.0)
-    assert risk == BearingRisk.HIGH
-
-    # 80 < 0.85 * 100 -> NORMAL
-    risk = analysis.assess_bearing_risk([80.0] * 1440, 100.0)
+    # Now returns NORMAL by default as threshold is removed
+    risk = analysis.assess_bearing_risk([90.0] * 1440)
     assert risk == BearingRisk.NORMAL
 
 def test_calculate_health_score_refined():

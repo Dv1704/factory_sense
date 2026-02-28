@@ -3,16 +3,13 @@ import numpy as np
 from typing import List, Tuple
 from app.models.mill_data import BearingRisk
 
-def calculate_baseline_kwh(df: pd.DataFrame, max_a: float) -> float:
-    """Compute 20th percentile of kWh values during RUNNING state, excluding overloads."""
+def calculate_baseline_kwh(df: pd.DataFrame) -> float:
+    """Compute 20th percentile of kWh values during RUNNING state."""
     if df.empty or 'motor_state' not in df.columns or 'energy_kwh' not in df.columns:
         return 0.0
     
-    # Authoritative exclusion logic
-    running_df = df[
-        (df['motor_state'] == 'RUNNING') & 
-        (df['current_A'] <= max_a)
-    ]
+    # Simple exclusion logic: only RUNNING state
+    running_df = df[df['motor_state'] == 'RUNNING']
     
     if running_df.empty:
         return 0.0
@@ -30,21 +27,11 @@ def calculate_excess_metrics(actual_kwh: float, baseline_kwh: float) -> Tuple[fl
     return excess_kwh, excess_co2
 
 def assess_bearing_risk(
-    rolling_history_1440: List[float],
-    max_a: float
+    rolling_history_1440: List[float]
 ) -> BearingRisk:
     """
-    Simple, explainable Bearing Risk Logic.
-    Rule: If 24h rolling mean current > 85% of max current -> HIGH, else NORMAL.
+    Simplified Bearing Risk Logic (Legacy threshold removed).
     """
-    if not rolling_history_1440:
-        return BearingRisk.NORMAL
-        
-    rolling_mean = sum(rolling_history_1440) / len(rolling_history_1440)
-    
-    if rolling_mean > 0.85 * max_a:
-        return BearingRisk.HIGH
-        
     return BearingRisk.NORMAL
 
 def calculate_health_score(excess_co2_kg: float, risk: BearingRisk) -> float:

@@ -35,7 +35,7 @@ def mock_db_and_auth(monkeypatch):
             if "alerts" in q_str:
                 if "count(" in q_str:
                     return MockResult([1])
-                return MockResult([Alert(id=1, mill_id="TEST", machine_id="M1", type=AlertType.HIGH_LOAD, message="Test Alert", is_acknowledged=False)])
+                return MockResult([Alert(id=1, mill_id="TEST", machine_id="M1", type=AlertType.WARNING, message="Test Alert", is_acknowledged=False)])
             if "machine_daily_stats" in q_str:
                 if "count(" in q_str:
                     return MockResult([1])
@@ -47,7 +47,7 @@ def mock_db_and_auth(monkeypatch):
                     id=1, mill_id="TEST", machine_id="M1", date=date.today(), 
                     total_energy_kwh=100.0, total_co2_kg=23.3, bearing_risk=BearingRisk.NORMAL,
                     baseline_kwh=80.0, excess_kwh=20.0, excess_co2_kg=4.66, run_hours=8.0,
-                    avg_current=15.0, max_current=20.0, health_score=85.0
+                    avg_current=15.0, health_score=85.0
                 )])
             return MockResult()
 
@@ -155,4 +155,5 @@ def test_dashboard_machine_specs(mock_db_and_auth):
     response = client.get("/api/v1/dashboard/machine-specs", headers=headers)
     assert response.status_code == 200
     assert "1BK1" in response.json()
-    assert response.json()["1BK1"]["max_a"] == 25.0
+    assert "name" in response.json()["1BK1"]
+    assert "max_a" not in response.json()["1BK1"]
