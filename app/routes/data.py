@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 
 from app.core.database import get_db
 from app.models.user import User
-from app.models.mill_data import RawFile, MachineDailyStats, BearingRisk, MachineDataPoint, Alert, AlertType
+from app.models.mill_data import RawFile, MachineDailyStats, BearingRisk, MachineDataPoint, Alert, AlertType, MachineBaseline
 from app.core.config import settings
 from app.core import physics, analysis
 from sqlalchemy.sql import text
