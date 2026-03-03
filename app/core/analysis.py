@@ -124,3 +124,22 @@ def generate_machine_insights(
         insights.append("Stable")
         
     return insights
+
+def assess_bearing_risk(history: List[float]) -> BearingRisk:
+    """
+    Assess bearing risk based on current spikes in history.
+    """
+    if not history or len(history) < 10:
+        return BearingRisk.NORMAL
+    
+    mu = np.mean(history)
+    max_val = np.max(history)
+    
+    if mu > 0:
+        ratio = max_val / mu
+        if ratio > 2.0:
+            return BearingRisk.HIGH
+        if ratio > 1.5:
+            return BearingRisk.WARNING
+            
+    return BearingRisk.NORMAL
