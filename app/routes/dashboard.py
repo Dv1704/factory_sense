@@ -4,6 +4,7 @@ from sqlalchemy.future import select
 from sqlalchemy import func
 from typing import List, Optional
 from datetime import date, datetime, timedelta
+import json
 
 from app.core.database import get_db
 from app.models.user import User
@@ -107,7 +108,6 @@ async def get_machines(
             status = "warning"
 
         # Parse health details for breakdown
-        import json
         health_breakdown = {}
         if s.health_score_details:
             try:

@@ -9,6 +9,7 @@ import gzip
 import shutil
 import os
 from datetime import date, datetime, timedelta
+import json
 
 from app.core.database import get_db
 from app.models.user import User
@@ -179,7 +180,6 @@ async def upload_csv(
         print(f"Error fetching batch metadata: {e}")
         stats_map, existing_alert_set = {}, set()
 
-    import json
     # 1. Batch fetch baselines
     baseline_res = await db.execute(
         select(MachineBaseline).where(MachineBaseline.machine_id.in_(machines), MachineBaseline.mill_id == user.mill_id)
