@@ -83,10 +83,43 @@ def generate_dataset(days, filename, resolution="1min"):
     df.to_csv(filename, index=False)
     print(f"Generated {filename} with {len(df)} records.")
 
+def generate_drift_dataset(days, filename):
+    """Generates a dataset where current slowly increases to simulate drift."""
+    time_index = pd.date_range(
+        start="2026-03-01",
+        periods=1440 * days,
+        freq="1min"
+    )
+    
+    rows = []
+    base_m = machines[0] # Use 1BK1
+    
+    for i, ts in enumerate(time_index):
+        day = i // 1440
+        # Slowly increase current: +1% per day
+        drift_factor = 1.0 + (day * 0.05) 
+        
+        current = np.random.normal(base_m["base_a"] * drift_factor, 0.2)
+        state = "RUNNING"
+        
+        rows.append({
+            "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "mill_id": "B",
+            "machine_id": base_m["machine_id"],
+            "current_A": round(max(current, 0), 2),
+            "motor_state": state
+        })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(filename, index=False)
+    print(f"Generated drift dataset {filename} with {len(df)} records.")
+
 if __name__ == "__main__":
     # 24 hours of 1-minute data
     generate_dataset(1, "mill_data_24h.csv", resolution="1min")
     # 14 days of daily summary data
     generate_dataset(14, "mill_daily_summary_14d.csv", resolution="daily")
-    # Also keeping the 14-day 1-minute data for alert testing
+    # Also keeping the 14-day 1-minute data for baseline/alert testing
     generate_dataset(14, "mill_data_14d.csv", resolution="1min")
+    # Drift dataset
+    generate_drift_dataset(7, "mill_drift_data.csv")

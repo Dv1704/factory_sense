@@ -16,27 +16,67 @@ def calculate_baseline_kwh(df: pd.DataFrame) -> float:
     
     return running_df['energy_kwh'].quantile(0.20)
 
-def calculate_excess_metrics(actual_kwh: float, baseline_kwh: float) -> Tuple[float, float]:
+def calculate_baseline_stats(df: pd.DataFrame) -> Tuple[float, float, float]:
     """
-    Calculate excess kWh and excess CO2.
-    excess_kwh = max(0, actual_kwh - baseline_kwh)
-    excess_co2 = excess_kwh * 0.233
+    Compute mu (mean), sigma (std), and p95 (95th percentile) for current_A.
+    Only considers RUNNING state.
     """
-    excess_kwh = max(0.0, actual_kwh - baseline_kwh)
-    excess_co2 = excess_kwh * 0.233
-    return excess_kwh, excess_co2
+    if df.empty or 'motor_state' not in df.columns or 'current_A' not in df.columns:
+        return 0.0, 0.0, 0.0
+    
+    running_df = df[df['motor_state'] == 'RUNNING']
+    if running_df.empty:
+        return 0.0, 0.0, 0.0
+    
+    mu = running_df['current_A'].mean()
+    sigma = running_df['current_A'].std()
+    p95 = running_df['current_A'].quantile(0.95)
+    
+    return float(mu), float(sigma if not np.isnan(sigma) else 0.0), float(p95)
 
-def assess_bearing_risk(
-    rolling_history_1440: List[float]
-) -> BearingRisk:
+def calculate_health_score_v2(
+    mean_curr: float, 
+    max_curr: float, 
+    baseline_mu: float, 
+    baseline_sigma: float, 
+    baseline_p95: float,
+    is_drifting: bool = False
+) -> Tuple[float, dict]:
     """
-    Simplified Bearing Risk Logic (Legacy threshold removed).
+    Calculate health score (0-100) based on deviations from baseline.
+    Health Score = 100 - (LoadPenalty + PeakPenalty + DriftPenalty)
     """
-    return BearingRisk.NORMAL
+    load_penalty = 0.0
+    peak_penalty = 0.0
+    drift_penalty = 0.0
+    
+    # 1. Load Shift: mean > mu + 2*sigma
+    if mean_curr > (baseline_mu + 2 * baseline_sigma) and baseline_mu > 0:
+        load_penalty = 20.0
+        # Scaled penalty if much higher
+        if mean_curr > (baseline_mu + 4 * baseline_sigma):
+            load_penalty = 40.0
 
-def calculate_health_score(excess_co2_kg: float, risk: BearingRisk) -> float:
-    """Placeholder for legacy health score logic."""
-    return 100.0
+    # 2. Peak Stress: max > p95
+    if max_curr > baseline_p95 and baseline_p95 > 0:
+        peak_penalty = 15.0
+        if max_curr > (baseline_p95 * 1.2):
+            peak_penalty = 30.0
+
+    # 3. Drift Trend
+    if is_drifting:
+        drift_penalty = 25.0
+
+    score = 100.0 - (load_penalty + peak_penalty + drift_penalty)
+    score = max(0.0, min(100.0, score))
+    
+    details = {
+        "load_penalty": load_penalty,
+        "peak_penalty": peak_penalty,
+        "drift_penalty": drift_penalty
+    }
+    
+    return score, details
 
 def calculate_health_score_refined(excess_co2_kg: float, total_co2_kg: float, risk: BearingRisk) -> float:
     risk_penalty = 0

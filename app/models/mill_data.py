@@ -10,9 +10,9 @@ class BearingRisk(str, enum.Enum):
     HIGH = "HIGH"
 
 class AlertType(str, enum.Enum):
-    DATA_GAP = "data_gap"
-    WARNING = "warning"
-    CO2_INCREASE = "co2_increase"
+    DATA_GAP = "DATA_GAP"
+    WARNING = "WARNING"
+    CO2_INCREASE = "CO2_INCREASE"
 
 class RawFile(Base):
     __tablename__ = "raw_files"
@@ -44,6 +44,22 @@ class MachineDailyStats(Base):
     run_hours = Column(Float, nullable=False)
     # New fields for machine metrics
     avg_current = Column(Float, nullable=True)
+    max_current = Column(Float, nullable=True)
+    std_current = Column(Float, nullable=True)
+    health_score_details = Column(String, nullable=True) # JSON string of penalties
+
+class MachineBaseline(Base):
+    __tablename__ = "machine_baselines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    mill_id = Column(String, index=True, nullable=False)
+    machine_id = Column(String, index=True, nullable=False)
+    
+    mean_current = Column(Float, nullable=False)
+    std_current = Column(Float, nullable=False)
+    p95_current = Column(Float, nullable=False)
+    
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 class MachineDataPoint(Base):
     __tablename__ = "machine_data_points"

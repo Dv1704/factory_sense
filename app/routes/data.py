@@ -179,6 +179,13 @@ async def upload_csv(
         print(f"Error fetching batch metadata: {e}")
         stats_map, existing_alert_set = {}, set()
 
+    import json
+    # 1. Batch fetch baselines
+    baseline_res = await db.execute(
+        select(MachineBaseline).where(MachineBaseline.machine_id.in_(machines), MachineBaseline.mill_id == user.mill_id)
+    )
+    baselines = {b.machine_id: b for b in baseline_res.scalars().all()}
+
     # 4. Vectorized processing by grouping (date, machine_id)
     processing_errors = []
     processed_count = 0
@@ -189,6 +196,8 @@ async def upload_csv(
             total_kwh=('energy_kwh', 'sum'),
             total_co2=('co2_kg', 'sum'),
             avg_current=('current_A', 'mean'),
+            max_current=('current_A', 'max'),
+            std_current=('current_A', 'std'),
             run_count=('motor_state', lambda x: (x == 'RUNNING').sum())
         ).reset_index()
         agg_df['run_hours'] = agg_df['run_count'] / 60.0
@@ -198,10 +207,63 @@ async def upload_csv(
             m_id = agg_row['machine_id']
             m_df = df[(df['date'] == curr_date) & (df['machine_id'] == m_id)]
             
+            # Get or initialize baseline
+            baseline = baselines.get(m_id)
+            if not baseline:
+                # Initialize baseline from current data if none exists
+                mu, sigma, p95 = analysis.calculate_baseline_stats(m_df)
+                baseline = MachineBaseline(
+                    mill_id=user.mill_id, machine_id=m_id,
+                    mean_current=mu, std_current=sigma, p95_current=p95
+                )
+                db.add(baseline)
+                baselines[m_id] = baseline
+                await db.flush() # Get ID if needed, though not used here
+
+            baseline_mu = baseline.mean_current
+            baseline_sigma = baseline.std_current
+            baseline_p95 = baseline.p95_current
+
+            # Drift Detection: last 7 days check
+            is_drifting = False
+            try:
+                # Get last 7 days of stats for this machine
+                prev_stats_res = await db.execute(
+                    select(MachineDailyStats.avg_current)
+                    .where(
+                        MachineDailyStats.mill_id == user.mill_id,
+                        MachineDailyStats.machine_id == m_id,
+                        MachineDailyStats.date < curr_date
+                    )
+                    .order_by(MachineDailyStats.date.desc())
+                    .limit(7)
+                )
+                recent_avg_currents = [r[0] for r in prev_stats_res.all()]
+                if len(recent_avg_currents) >= 5:
+                    # Check if strictly increasing
+                    current_series = [agg_row['avg_current']] + recent_avg_currents
+                    # We want to see if today > yesterday > day before...
+                    # but recent_avg_currents is [yesterday, day-2, ...]
+                    increasing = True
+                    for i in range(len(current_series) - 1):
+                        if current_series[i] <= current_series[i+1]:
+                            increasing = False
+                            break
+                    if increasing:
+                        is_drifting = True
+            except Exception as e:
+                print(f"Error in drift detection for {m_id}: {e}")
+
             baseline_kwh = analysis.calculate_baseline_kwh(m_df)
             running_mask = m_df['motor_state'] == 'RUNNING'
             excess_kwh_sum = (m_df.loc[running_mask, 'energy_kwh'] - baseline_kwh).clip(lower=0).sum()
             excess_co2_sum = excess_kwh_sum * EF
+            
+            # Health Score v2
+            health_score, health_details = analysis.calculate_health_score_v2(
+                float(agg_row['avg_current']), float(agg_row['max_current']),
+                baseline_mu, baseline_sigma, baseline_p95, is_drifting
+            )
             
             combined_history = (m_df['current_A'].tolist() + history_map.get(m_id, []))[:1440]
             risk = analysis.assess_bearing_risk(combined_history)
@@ -215,20 +277,47 @@ async def upload_csv(
                 stats.excess_kwh += float(excess_kwh_sum)
                 stats.excess_co2_kg += float(excess_co2_sum)
                 stats.avg_current = (stats.avg_current + float(agg_row['avg_current'])) / 2
-                stats.health_score = analysis.calculate_health_score_refined(stats.excess_co2_kg, stats.total_co2_kg, stats.bearing_risk)
+                stats.max_current = max(stats.max_current or 0.0, float(agg_row['max_current']))
+                stats.std_current = float(agg_row['std_current'])
+                stats.health_score = health_score
+                stats.health_score_details = json.dumps(health_details)
             else:
-                health_score = analysis.calculate_health_score_refined(excess_co2_sum, float(agg_row['total_co2']), risk)
                 stats = MachineDailyStats(
                     date=curr_date, mill_id=user.mill_id, machine_id=m_id,
                     total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh, excess_kwh=float(excess_kwh_sum),
                     total_co2_kg=float(agg_row['total_co2']), excess_co2_kg=float(excess_co2_sum),
                     bearing_risk=risk, health_score=health_score, run_hours=float(agg_row['run_hours']),
-                    avg_current=float(agg_row['avg_current'])
+                    avg_current=float(agg_row['avg_current']), max_current=float(agg_row['max_current']),
+                    std_current=float(agg_row['std_current']),
+                    health_score_details=json.dumps(health_details)
                 )
                 db.add(stats)
-                stats_map[(m_id, curr_date)] = stats # Update map for potential multi-file overlap (unlikely here but safe)
+                stats_map[(m_id, curr_date)] = stats # Update map
             
-            # CO2 Increase Check
+            # Alerts for new conditions
+            if health_details['load_penalty'] > 0:
+                alert = Alert(
+                    mill_id=user.mill_id, machine_id=m_id,
+                    type=AlertType.WARNING,
+                    message=f"Machine {m_id} Load Shift: Mean Current ({float(agg_row['avg_current']):.1f}A) > Baseline + 2*Std"
+                )
+                db.add(alert)
+            if health_details['peak_penalty'] > 0:
+                alert = Alert(
+                    mill_id=user.mill_id, machine_id=m_id,
+                    type=AlertType.WARNING,
+                    message=f"Machine {m_id} Peak Stress: Max Current ({float(agg_row['max_current']):.1f}A) > Baseline P95"
+                )
+                db.add(alert)
+            if is_drifting:
+                alert = Alert(
+                    mill_id=user.mill_id, machine_id=m_id,
+                    type=AlertType.WARNING,
+                    message=f"Machine {m_id} Drift Detected: Current rising for 5+ days"
+                )
+                db.add(alert)
+
+            # CO2 Increase Check (Legacy)
             prev_date = curr_date - timedelta(days=1)
             prev_stats = stats_map.get((m_id, prev_date))
             if prev_stats and prev_stats.total_co2_kg > 0:

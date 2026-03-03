@@ -2,44 +2,60 @@ import pytest
 import pandas as pd
 import numpy as np
 from app.core import analysis
-from app.models.mill_data import BearingRisk
 
-def test_calculate_baseline_kwh():
-    # Test with standard RUNNING data
+def test_calculate_baseline_stats():
     data = {
-        'motor_state': ['RUNNING', 'RUNNING', 'RUNNING', 'RUNNING', 'RUNNING', 'STOPPED'],
-        'energy_kwh': [10.0, 11.0, 12.0, 13.0, 14.0, 5.0],
-        'current_A': [10.0, 11.0, 12.0, 13.0, 14.0, 5.0]
+        'motor_state': ['RUNNING', 'RUNNING', 'OFF', 'RUNNING'],
+        'current_A': [10.0, 12.0, 0.0, 11.0]
     }
     df = pd.DataFrame(data)
-    # Quantile 0.20 of [10, 11, 12, 13, 14] is 10.8 (interpolation)
-    expected = pd.Series([10.0, 11.0, 12.0, 13.0, 14.0]).quantile(0.20)
-    assert analysis.calculate_baseline_kwh(df) == expected
+    mu, sigma, p95 = analysis.calculate_baseline_stats(df)
+    
+    assert mu == 11.0
+    assert sigma == pytest.approx(1.0)
+    assert p95 == pytest.approx(11.9) # 95th percentile of [10, 11, 12]
 
-    # Test empty
-    assert analysis.calculate_baseline_kwh(pd.DataFrame()) == 0.0
-
-def test_calculate_excess_metrics():
-    # excess_kwh = max(0, 10 - 8) = 2
-    # excess_co2 = 2 * 0.233 = 0.466
-    kwh, co2 = analysis.calculate_excess_metrics(10.0, 8.0)
-    assert kwh == 2.0
-    assert abs(co2 - 0.466) < 0.0001
-
-def test_assess_bearing_risk():
-    # Now returns NORMAL by default as threshold is removed
-    risk = analysis.assess_bearing_risk([90.0] * 1440)
-    assert risk == BearingRisk.NORMAL
-
-def test_calculate_health_score_refined():
-    # 100 - (0.1 * 50) - 20 (WARNING) = 100 - 5 - 20 = 75
-    score = analysis.calculate_health_score_refined(10.0, 100.0, BearingRisk.WARNING)
-    assert score == 75.0
-
-    # 100 - (0.5 * 50) - 50 (HIGH) = 100 - 25 - 50 = 25
-    score = analysis.calculate_health_score_refined(50.0, 100.0, BearingRisk.HIGH)
-    assert score == 25.0
-
-    # Perfect score
-    score = analysis.calculate_health_score_refined(0.0, 100.0, BearingRisk.NORMAL)
+def test_calculate_health_score_v2_normal():
+    score, details = analysis.calculate_health_score_v2(
+        mean_curr=11.0, max_curr=12.5,
+        baseline_mu=11.0, baseline_sigma=1.0, baseline_p95=13.0
+    )
     assert score == 100.0
+    assert details["load_penalty"] == 0.0
+    assert details["peak_penalty"] == 0.0
+
+def test_calculate_health_score_v2_load_shift():
+    # mu + 2*sigma = 10 + 2*1 = 12. Today mean 13 > 12.
+    score, details = analysis.calculate_health_score_v2(
+        mean_curr=13.0, max_curr=14.0,
+        baseline_mu=10.0, baseline_sigma=1.0, baseline_p95=15.0
+    )
+    assert score == 80.0
+    assert details["load_penalty"] == 20.0
+
+def test_calculate_health_score_v2_peak_stress():
+    # max 16 > p95 15.
+    score, details = analysis.calculate_health_score_v2(
+        mean_curr=10.0, max_curr=16.0,
+        baseline_mu=10.0, baseline_sigma=1.0, baseline_p95=15.0
+    )
+    assert score == 85.0
+    assert details["peak_penalty"] == 15.0
+
+def test_calculate_health_score_v2_drift():
+    score, details = analysis.calculate_health_score_v2(
+        mean_curr=10.0, max_curr=12.0,
+        baseline_mu=10.0, baseline_sigma=1.0, baseline_p95=15.0,
+        is_drifting=True
+    )
+    assert score == 75.0
+    assert details["drift_penalty"] == 25.0
+
+def test_calculate_health_score_v2_combined():
+    score, details = analysis.calculate_health_score_v2(
+        mean_curr=13.0, max_curr=16.0,
+        baseline_mu=10.0, baseline_sigma=1.0, baseline_p95=15.0,
+        is_drifting=True
+    )
+    # 100 - (20 + 15 + 25) = 40
+    assert score == 40.0
