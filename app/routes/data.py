@@ -18,7 +18,14 @@ from app.core.config import settings
 from app.core import physics, analysis
 from sqlalchemy.sql import text
 
+from pydantic import BaseModel
+
 router = APIRouter()
+
+class BaselineUpdate(BaseModel):
+    mean_current: float
+    std_current: float
+    p95_current: float
 
 async def check_db_connection(db: AsyncSession) -> bool:
     try:
@@ -69,12 +76,23 @@ async def insert_data_points_task(data_points: List[dict], db_factory):
 @router.post("/upload")
 async def upload_csv(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(...), 
-    x_api_key: str = Header(...),
+    file: UploadFile = File(...),
+    user: User = Depends(get_api_key_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await get_api_key_user(x_api_key, db)
-    
+    if not user.has_uploaded_baseline:
+        # Check if the mill already has baselines (perhaps from another user)
+        res = await db.execute(select(MachineBaseline).where(MachineBaseline.mill_id == user.mill_id).limit(1))
+        if not res.scalars().first():
+            raise HTTPException(
+                status_code=403, 
+                detail="New users must upload baseline data before uploading operational data. Use /api/v1/baseline/upload."
+            )
+        else:
+            # Sync user state if baselines exist but flag is false
+            user.has_uploaded_baseline = True
+            await db.commit()
+
     content = await file.read()
     try:
         df = pd.read_csv(io.BytesIO(content))
@@ -357,12 +375,136 @@ async def upload_csv(
         "errors": processing_errors
     }
 
-@router.get("/data/history")
-async def get_upload_history(
-    x_api_key: str = Header(...),
+@router.post("/baseline/upload")
+async def upload_baseline(
+    file: UploadFile = File(...),
+    user: User = Depends(get_api_key_user),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await get_api_key_user(x_api_key, db)
+    
+    content = await file.read()
+    try:
+        df = pd.read_csv(io.BytesIO(content))
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid CSV format: {str(e)}")
+    
+    required_cols = {'timestamp', 'mill_id', 'machine_id', 'current_A', 'motor_state'}
+    missing_cols = required_cols - set(df.columns)
+    if missing_cols:
+        raise HTTPException(status_code=400, detail=f"Missing columns: {', '.join(missing_cols)}")
+
+    # Specific row-level cleaning
+    df = df.dropna(subset=['timestamp', 'machine_id', 'mill_id'])
+    df['current_A'] = pd.to_numeric(df['current_A'], errors='coerce').fillna(0.0)
+    df['motor_state'] = df['motor_state'].astype(str).str.upper().str.strip()
+    
+    machines = df['machine_id'].unique().tolist()
+    baselines_created = 0
+    
+    for m_id in machines:
+        m_df = df[df['machine_id'] == m_id]
+        mu, sigma, p95 = analysis.calculate_baseline_stats(m_df)
+        
+        # Upsert baseline
+        stmt = select(MachineBaseline).where(
+            MachineBaseline.mill_id == user.mill_id,
+            MachineBaseline.machine_id == m_id
+        )
+        result = await db.execute(stmt)
+        baseline = result.scalars().first()
+        
+        if baseline:
+            baseline.mean_current = mu
+            baseline.std_current = sigma
+            baseline.p95_current = p95
+        else:
+            baseline = MachineBaseline(
+                mill_id=user.mill_id,
+                machine_id=m_id,
+                mean_current=mu,
+                std_current=sigma,
+                p95_current=p95
+            )
+            db.add(baseline)
+        baselines_created += 1
+
+    user.has_uploaded_baseline = True
+    await db.commit()
+    
+    return {
+        "status": "success",
+        "message": f"Baselines created/updated for {baselines_created} machines.",
+        "machines": machines
+    }
+
+@router.get("/baseline")
+async def get_baselines(
+    user: User = Depends(get_api_key_user),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(MachineBaseline).where(MachineBaseline.mill_id == user.mill_id))
+    baselines = result.scalars().all()
+    return [
+        {
+            "machine_id": b.machine_id,
+            "mean_current": b.mean_current,
+            "std_current": b.std_current,
+            "p95_current": b.p95_current,
+            "updated_at": b.updated_at
+        } for b in baselines
+    ]
+
+@router.put("/baseline/{machine_id}")
+async def update_baseline(
+    machine_id: str,
+    baseline_data: BaselineUpdate,
+    user: User = Depends(get_api_key_user),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(MachineBaseline).where(
+            MachineBaseline.mill_id == user.mill_id,
+            MachineBaseline.machine_id == machine_id
+        )
+    )
+    baseline = result.scalars().first()
+    if not baseline:
+        raise HTTPException(status_code=404, detail="Baseline not found")
+    
+    baseline.mean_current = baseline_data.mean_current
+    baseline.std_current = baseline_data.std_current
+    baseline.p95_current = baseline_data.p95_current
+    
+    await db.commit()
+    return {"status": "success", "message": f"Baseline for {machine_id} updated"}
+
+@router.delete("/baseline/{machine_id}")
+async def delete_baseline(
+    machine_id: str,
+    user: User = Depends(get_api_key_user),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(MachineBaseline).where(
+            MachineBaseline.mill_id == user.mill_id,
+            MachineBaseline.machine_id == machine_id
+        )
+    )
+    baseline = result.scalars().first()
+    if not baseline:
+        raise HTTPException(status_code=404, detail="Baseline not found")
+    
+    await db.delete(baseline)
+    await db.commit()
+    return {"status": "success", "message": f"Baseline for {machine_id} deleted"}
+
+@router.get("/data/history")
+async def get_upload_history(
+    user: User = Depends(get_api_key_user),
+    db: AsyncSession = Depends(get_db)
+):
     result = await db.execute(
         select(RawFile)
         .where(RawFile.mill_id == user.mill_id)

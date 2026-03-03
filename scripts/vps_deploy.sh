@@ -42,14 +42,22 @@ sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_IP << 'EOF
 
     echo "Starting containers..."
     # Try docker compose first, then docker-compose
-    if docker compose version &> /dev/null; then
-        docker compose -f docker-compose.prod.yml up -d --build
-    else
-        docker-compose -f docker-compose.prod.yml up -d --build
+    COMPOSE_CMD="docker compose"
+    if ! docker compose version &> /dev/null; then
+        COMPOSE_CMD="docker-compose"
     fi
+    
+    $COMPOSE_CMD -f docker-compose.prod.yml up -d --build
 
     echo "Waiting for services to start..."
     sleep 10
+    
+    echo "Running database migrations..."
+    # Add column if missing
+    $COMPOSE_CMD -f docker-compose.prod.yml exec -T db psql -U factory_user -d factorysense -c "ALTER TABLE users ADD COLUMN IF NOT EXISTS has_uploaded_baseline BOOLEAN DEFAULT FALSE;"
+    # Create missing tables
+    $COMPOSE_CMD -f docker-compose.prod.yml exec -T web python create_tables.py
+    
     docker ps
 EOF
 
