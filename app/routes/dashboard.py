@@ -101,14 +101,32 @@ async def get_machines(
     machines = []
     for s in all_stats:
         status = "normal"
-        if s.bearing_risk == BearingRisk.WARNING or s.bearing_risk == BearingRisk.HIGH:
+        if s.bearing_risk == BearingRisk.NORMAL:
+            status = "normal"
+        else:
             status = "warning"
+
+        # Parse health details for breakdown
+        import json
+        health_breakdown = {}
+        if s.health_score_details:
+            try:
+                health_breakdown = json.loads(s.health_score_details)
+            except:
+                pass
 
         machines.append({
             "machine_id": s.machine_id,
             "energy_consumption": round(s.total_energy_kwh, 2),
             "carbon_emissions": round(s.total_co2_kg, 2),
             "avg_current": round(s.avg_current_A, 2) if s.avg_current_A else 0,
+            "reference_metrics": {
+                "baseline_mean": round(s.reference_mean, 2) if s.reference_mean else 0.0,
+                "baseline_std": round(s.reference_std, 2) if s.reference_std else 0.0,
+                "baseline_p95": round(s.reference_p95, 2) if s.reference_p95 else 0.0
+            },
+            "health_score": round(s.health_score, 1),
+            "health_score_breakdown": health_breakdown,
             "status": status
         })
     

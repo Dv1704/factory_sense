@@ -46,6 +46,12 @@ class MachineDailyStats(Base):
     avg_current_A = Column(Float, nullable=True)
     max_current = Column(Float, nullable=True)
     std_current = Column(Float, nullable=True)
+    
+    # Reference fields for industrial intelligence
+    reference_mean = Column(Float, nullable=True)
+    reference_std = Column(Float, nullable=True)
+    reference_p95 = Column(Float, nullable=True)
+    
     health_score_details = Column(String, nullable=True) # JSON string of penalties
 
 class MachineBaseline(Base):

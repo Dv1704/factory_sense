@@ -281,6 +281,9 @@ async def upload_csv(
                 stats.std_current = float(agg_row['std_current'])
                 stats.health_score = health_score
                 stats.health_score_details = json.dumps(health_details)
+                stats.reference_mean = float(baseline_mu)
+                stats.reference_std = float(baseline_sigma)
+                stats.reference_p95 = float(baseline_p95)
             else:
                 stats = MachineDailyStats(
                     date=curr_date, mill_id=user.mill_id, machine_id=m_id,
@@ -289,6 +292,7 @@ async def upload_csv(
                     bearing_risk=risk, health_score=health_score, run_hours=float(agg_row['run_hours']),
                     avg_current_A=float(agg_row['avg_current']), max_current=float(agg_row['max_current']),
                     std_current=float(agg_row['std_current']),
+                    reference_mean=float(baseline_mu), reference_std=float(baseline_sigma), reference_p95=float(baseline_p95),
                     health_score_details=json.dumps(health_details)
                 )
                 db.add(stats)
@@ -411,6 +415,14 @@ async def get_summary(
         spec = MACHINE_SPECS.get(machine_id, {"name": f"Machine {machine_id}"})
         insights = analysis.generate_machine_insights(s.excess_co2_kg, s.bearing_risk, s.health_score)
         
+        # Parse health details for breakdown
+        health_breakdown = {}
+        if s.health_score_details:
+            try:
+                health_breakdown = json.loads(s.health_score_details)
+            except:
+                pass
+
         machine_analytics.append({
             "machine_id": machine_id,
             "name": spec.get("name", f"Machine {machine_id}"),
@@ -418,9 +430,15 @@ async def get_summary(
             "total_energy_kwh": round(s.total_energy_kwh, 2),
             "run_hours": round(s.run_hours, 1),
             "avg_current_A": round(s.avg_current_A, 2) if s.avg_current_A else 0.0,
-            "excess_co2_kg": round(s.excess_co2_kg, 2),
+            "reference_metrics": {
+                "baseline_mean": round(s.reference_mean, 2) if s.reference_mean else 0.0,
+                "baseline_std": round(s.reference_std, 2) if s.reference_std else 0.0,
+                "baseline_p95": round(s.reference_p95, 2) if s.reference_p95 else 0.0
+            },
             "health_score": round(s.health_score, 1),
+            "health_score_breakdown": health_breakdown,
             "bearing_risk": s.bearing_risk,
+            "excess_co2_kg": round(s.excess_co2_kg, 2),
             "insights": insights
         })
         
