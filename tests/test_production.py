@@ -47,7 +47,7 @@ def mock_db_and_auth(monkeypatch):
                     id=1, mill_id="TEST", machine_id="M1", date=date.today(), 
                     total_energy_kwh=100.0, total_co2_kg=23.3, bearing_risk=BearingRisk.NORMAL,
                     baseline_kwh=80.0, excess_kwh=20.0, excess_co2_kg=4.66, run_hours=8.0,
-                    avg_current=15.0, health_score=85.0
+                    avg_current_A=15.0, health_score=85.0
                 )])
             return MockResult()
 

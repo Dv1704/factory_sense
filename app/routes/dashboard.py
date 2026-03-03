@@ -108,7 +108,7 @@ async def get_machines(
             "machine_id": s.machine_id,
             "energy_consumption": round(s.total_energy_kwh, 2),
             "carbon_emissions": round(s.total_co2_kg, 2),
-            "avg_current": round(s.avg_current, 2) if s.avg_current else 0,
+            "avg_current": round(s.avg_current_A, 2) if s.avg_current_A else 0,
             "status": status
         })
     

@@ -229,7 +229,7 @@ async def upload_csv(
             try:
                 # Get last 7 days of stats for this machine
                 prev_stats_res = await db.execute(
-                    select(MachineDailyStats.avg_current)
+                    select(MachineDailyStats.avg_current_A)
                     .where(
                         MachineDailyStats.mill_id == user.mill_id,
                         MachineDailyStats.machine_id == m_id,
@@ -276,7 +276,7 @@ async def upload_csv(
                 stats.run_hours += float(agg_row['run_hours'])
                 stats.excess_kwh += float(excess_kwh_sum)
                 stats.excess_co2_kg += float(excess_co2_sum)
-                stats.avg_current = (stats.avg_current + float(agg_row['avg_current'])) / 2
+                stats.avg_current_A = (stats.avg_current_A + float(agg_row['avg_current'])) / 2
                 stats.max_current = max(stats.max_current or 0.0, float(agg_row['max_current']))
                 stats.std_current = float(agg_row['std_current'])
                 stats.health_score = health_score
@@ -287,7 +287,7 @@ async def upload_csv(
                     total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh, excess_kwh=float(excess_kwh_sum),
                     total_co2_kg=float(agg_row['total_co2']), excess_co2_kg=float(excess_co2_sum),
                     bearing_risk=risk, health_score=health_score, run_hours=float(agg_row['run_hours']),
-                    avg_current=float(agg_row['avg_current']), max_current=float(agg_row['max_current']),
+                    avg_current_A=float(agg_row['avg_current']), max_current=float(agg_row['max_current']),
                     std_current=float(agg_row['std_current']),
                     health_score_details=json.dumps(health_details)
                 )
@@ -400,6 +400,8 @@ async def get_summary(
         if s.machine_id not in latest_stats:
             latest_stats[s.machine_id] = s
             
+    total_co2_kg = sum(s.total_co2_kg for s in latest_stats.values())
+    total_energy_kwh = sum(s.total_energy_kwh for s in latest_stats.values())
     total_excess_co2 = sum(s.excess_co2_kg for s in latest_stats.values())
     total_excess_kwh = sum(s.excess_kwh for s in latest_stats.values())
     avoidable_cost = total_excess_kwh * 0.15
@@ -414,8 +416,9 @@ async def get_summary(
             "name": spec.get("name", f"Machine {machine_id}"),
             "total_co2_kg": round(s.total_co2_kg, 2),
             "total_energy_kwh": round(s.total_energy_kwh, 2),
+            "run_hours": round(s.run_hours, 1),
+            "avg_current_A": round(s.avg_current_A, 2) if s.avg_current_A else 0.0,
             "excess_co2_kg": round(s.excess_co2_kg, 2),
-            "kilowatt_usage": round(s.total_energy_kwh / (s.run_hours if s.run_hours > 0 else 1), 2),
             "health_score": round(s.health_score, 1),
             "bearing_risk": s.bearing_risk,
             "insights": insights
@@ -426,6 +429,8 @@ async def get_summary(
         "db_connected": is_db_connected,
         "last_updated": datetime.now().isoformat(),
         "summary_metrics": {
+            "total_energy_kwh": round(total_energy_kwh, 2),
+            "total_co2_kg": round(total_co2_kg, 2),
             "total_excess_co2_kg": round(total_excess_co2, 2),
             "avoidable_cost_usd": round(avoidable_cost, 2),
         },

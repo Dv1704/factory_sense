@@ -43,7 +43,7 @@ class MachineDailyStats(Base):
     
     run_hours = Column(Float, nullable=False)
     # New fields for machine metrics
-    avg_current = Column(Float, nullable=True)
+    avg_current_A = Column(Float, nullable=True)
     max_current = Column(Float, nullable=True)
     std_current = Column(Float, nullable=True)
     health_score_details = Column(String, nullable=True) # JSON string of penalties
