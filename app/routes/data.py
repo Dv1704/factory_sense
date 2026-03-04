@@ -81,12 +81,12 @@ async def upload_csv(
     db: AsyncSession = Depends(get_db)
 ):
     if not user.has_uploaded_baseline:
-        # Check if the mill already has baselines (perhaps from another user)
+        # Check if the mill already has ANY baselines (perhaps from another user)
         res = await db.execute(select(MachineBaseline).where(MachineBaseline.mill_id == user.mill_id).limit(1))
         if not res.scalars().first():
             raise HTTPException(
                 status_code=403, 
-                detail="New users must upload baseline data before uploading operational data. Use /api/v1/baseline/upload."
+                detail="No baseline data found for this mill. You must upload baseline data before uploading operational data. Use /api/v1/baseline/upload."
             )
         else:
             # Sync user state if baselines exist but flag is false
@@ -204,6 +204,14 @@ async def upload_csv(
     )
     baselines = {b.machine_id: b for b in baseline_res.scalars().all()}
 
+    # Check if all machines have baselines
+    missing_baselines = [m for m in machines if m not in baselines]
+    if missing_baselines:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing baseline data for machines: {', '.join(missing_baselines)}. Please upload baseline data for these machines first."
+        )
+
     # 4. Vectorized processing by grouping (date, machine_id)
     processing_errors = []
     processed_count = 0
@@ -225,18 +233,10 @@ async def upload_csv(
             m_id = agg_row['machine_id']
             m_df = df[(df['date'] == curr_date) & (df['machine_id'] == m_id)]
             
-            # Get or initialize baseline
+            # Get baseline (already verified exists above)
             baseline = baselines.get(m_id)
             if not baseline:
-                # Initialize baseline from current data if none exists
-                mu, sigma, p95 = analysis.calculate_baseline_stats(m_df)
-                baseline = MachineBaseline(
-                    mill_id=user.mill_id, machine_id=m_id,
-                    mean_current=mu, std_current=sigma, p95_current=p95
-                )
-                db.add(baseline)
-                baselines[m_id] = baseline
-                await db.flush() # Get ID if needed, though not used here
+                continue
 
             baseline_mu = baseline.mean_current
             baseline_sigma = baseline.std_current
