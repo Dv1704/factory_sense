@@ -12,8 +12,8 @@ from datetime import date, datetime, timedelta
 import json
 
 from app.core.database import get_db
-from app.models.user import User
-from app.models.mill_data import RawFile, MachineDailyStats, BearingRisk, MachineDataPoint, Alert, AlertType, MachineBaseline
+from app.models.user import User, Mill
+from app.models.mill_data import RawFile, MachineDailyStats, BearingRisk, MachineDataPoint, Alert, AlertType, MachineBaseline, MachineBaselineHistory
 from app.core.config import settings
 from app.core import physics, analysis
 from sqlalchemy.sql import text
@@ -51,17 +51,22 @@ MACHINE_SPECS = {
     "4BK_C": {"name": "4th Break Roll (Coarse)"},
 }
 
-async def get_api_key_user(x_api_key: str = Header(...), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.api_key == x_api_key))
-    user = result.scalars().first()
-    if not user:
+async def get_api_key_mill(x_api_key: str = Header(...), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Mill).where(Mill.api_key == x_api_key))
+    mill = result.scalars().first()
+    if not mill:
         raise HTTPException(status_code=401, detail="Invalid API Key")
-    return user
+    return mill
 
-async def insert_data_points_task(data_points: List[dict], db_factory):
+async def insert_data_points_task(data_points: List[dict], user_id: int, db_factory):
     """Background task to insert raw data points in chunks."""
     if not data_points:
         return
+    
+    # Add user_id to all data points
+    for dp in data_points:
+        dp['user_id'] = user_id
+        
     chunk_size = 500
     for i in range(0, len(data_points), chunk_size):
         chunk = data_points[i:i + chunk_size]
@@ -77,21 +82,15 @@ async def insert_data_points_task(data_points: List[dict], db_factory):
 async def upload_csv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    user: User = Depends(get_api_key_user),
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
-    if not user.has_uploaded_baseline:
-        # Check if the mill already has ANY baselines (perhaps from another user)
-        res = await db.execute(select(MachineBaseline).where(MachineBaseline.mill_id == user.mill_id).limit(1))
-        if not res.scalars().first():
-            raise HTTPException(
-                status_code=403, 
-                detail="No baseline data found for this mill. You must upload baseline data before uploading operational data. Use /api/v1/baseline/upload."
-            )
-        else:
-            # Sync user state if baselines exist but flag is false
-            user.has_uploaded_baseline = True
-            await db.commit()
+    if not mill.has_uploaded_baseline:
+        # User must have uploaded their own baseline
+        raise HTTPException(
+            status_code=403, 
+            detail="You must upload baseline data before uploading operational data. Use /api/v1/baseline/upload."
+        )
 
     content = await file.read()
     try:
@@ -119,7 +118,7 @@ async def upload_csv(
     if df.empty:
         return {"status": "success", "records_processed": 0, "message": "No valid data rows found after cleaning"}
 
-    file_path = f"data/raw/mill_{user.mill_id}/{file.filename}.gz"
+    file_path = f"data/raw/mill_{mill.mill_id}/{file.filename}.gz"
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with gzip.open(file_path, 'wb') as f_out:
         f_out.write(content)
@@ -148,7 +147,7 @@ async def upload_csv(
     try:
         h_result = await db.execute(
             select(MachineDataPoint.machine_id, MachineDataPoint.current_A)
-            .where(MachineDataPoint.machine_id.in_(machines))
+            .where(MachineDataPoint.user_id == mill.user_id, MachineDataPoint.machine_id.in_(machines))
             .order_by(MachineDataPoint.machine_id, MachineDataPoint.timestamp.desc())
         )
         temp_history = {}
@@ -171,7 +170,7 @@ async def upload_csv(
         stats_result = await db.execute(
             select(MachineDailyStats)
             .where(
-                MachineDailyStats.mill_id == user.mill_id,
+                MachineDailyStats.user_id == mill.user_id,
                 MachineDailyStats.machine_id.in_(machines),
                 MachineDailyStats.date.in_(list(all_relevant_dates))
             )
@@ -184,7 +183,7 @@ async def upload_csv(
         existing_alerts_res = await db.execute(
             select(Alert.machine_id, Alert.timestamp)
             .where(
-                Alert.mill_id == user.mill_id,
+                Alert.user_id == mill.user_id,
                 Alert.machine_id.in_(machines),
                 Alert.type == AlertType.CO2_INCREASE
             )
@@ -200,7 +199,10 @@ async def upload_csv(
 
     # 1. Batch fetch baselines
     baseline_res = await db.execute(
-        select(MachineBaseline).where(MachineBaseline.machine_id.in_(machines), MachineBaseline.mill_id == user.mill_id)
+        select(MachineBaseline).where(
+            MachineBaseline.user_id == mill.user_id,
+            MachineBaseline.machine_id.in_(machines)
+        )
     )
     baselines = {b.machine_id: b for b in baseline_res.scalars().all()}
 
@@ -249,7 +251,7 @@ async def upload_csv(
                 prev_stats_res = await db.execute(
                     select(MachineDailyStats.avg_current_A)
                     .where(
-                        MachineDailyStats.mill_id == user.mill_id,
+                        MachineDailyStats.user_id == mill.user_id,
                         MachineDailyStats.machine_id == m_id,
                         MachineDailyStats.date < curr_date
                     )
@@ -304,7 +306,8 @@ async def upload_csv(
                 stats.reference_p95 = float(baseline_p95)
             else:
                 stats = MachineDailyStats(
-                    date=curr_date, mill_id=user.mill_id, machine_id=m_id,
+                    user_id=mill.user_id,
+                    date=curr_date, mill_id=mill.mill_id, machine_id=m_id,
                     total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh, excess_kwh=float(excess_kwh_sum),
                     total_co2_kg=float(agg_row['total_co2']), excess_co2_kg=float(excess_co2_sum),
                     bearing_risk=risk, health_score=health_score, run_hours=float(agg_row['run_hours']),
@@ -319,21 +322,24 @@ async def upload_csv(
             # Alerts for new conditions
             if health_details['load_penalty'] > 0:
                 alert = Alert(
-                    mill_id=user.mill_id, machine_id=m_id,
+                    user_id=mill.user_id,
+                    mill_id=mill.mill_id, machine_id=m_id,
                     type=AlertType.WARNING,
                     message=f"Machine {m_id} Load Shift: Mean Current ({float(agg_row['avg_current']):.1f}A) > Baseline + 2*Std"
                 )
                 db.add(alert)
             if health_details['peak_penalty'] > 0:
                 alert = Alert(
-                    mill_id=user.mill_id, machine_id=m_id,
+                    user_id=mill.user_id,
+                    mill_id=mill.mill_id, machine_id=m_id,
                     type=AlertType.WARNING,
                     message=f"Machine {m_id} Peak Stress: Max Current ({float(agg_row['max_current']):.1f}A) > Baseline P95"
                 )
                 db.add(alert)
             if is_drifting:
                 alert = Alert(
-                    mill_id=user.mill_id, machine_id=m_id,
+                    user_id=mill.user_id,
+                    mill_id=mill.mill_id, machine_id=m_id,
                     type=AlertType.WARNING,
                     message=f"Machine {m_id} Drift Detected: Current rising for 5+ days"
                 )
@@ -346,7 +352,8 @@ async def upload_csv(
                 increase_pct = ((stats.total_co2_kg - prev_stats.total_co2_kg) / prev_stats.total_co2_kg) * 100
                 if increase_pct > 5.0 and (m_id, curr_date) not in existing_alert_set:
                     alert = Alert(
-                        mill_id=user.mill_id,
+                        user_id=mill.user_id,
+                        mill_id=mill.mill_id,
                         machine_id=m_id,
                         type=AlertType.CO2_INCREASE,
                         message=f"Machine {m_id} CO2 increased by {increase_pct:.1f}% compared to previous day"
@@ -360,12 +367,12 @@ async def upload_csv(
         print(msg)
         processing_errors.append(msg)
 
-    raw_file = RawFile(mill_id=user.mill_id, filename=file.filename, status="PROCESSED")
+    raw_file = RawFile(user_id=mill.user_id, mill_id=mill.mill_id, filename=file.filename, status="PROCESSED")
     db.add(raw_file)
     await db.commit()
 
     from app.core.database import AsyncSessionLocal
-    background_tasks.add_task(insert_data_points_task, data_points, AsyncSessionLocal)
+    background_tasks.add_task(insert_data_points_task, data_points, mill.user_id, AsyncSessionLocal)
     
     return {
         "status": "success", 
@@ -378,7 +385,7 @@ async def upload_csv(
 @router.post("/baseline/upload")
 async def upload_baseline(
     file: UploadFile = File(...),
-    user: User = Depends(get_api_key_user),
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
     
@@ -401,50 +408,151 @@ async def upload_baseline(
     df['motor_state'] = df['motor_state'].astype(str).str.upper().str.strip()
     
     machines = df['machine_id'].unique().tolist()
-    baselines_created = 0
+    baselines_updated = 0
     
     for m_id in machines:
         m_df = df[df['machine_id'] == m_id]
-        mu, sigma, p95 = analysis.calculate_baseline_stats(m_df)
+        mu_new, sigma_new, p95_new = analysis.calculate_baseline_stats(m_df)
+        n_new = len(m_df[m_df['motor_state'] == 'RUNNING'])
         
-        # Upsert baseline
+        if n_new == 0:
+            continue
+
+        # Upsert baseline with merging logic
         stmt = select(MachineBaseline).where(
-            MachineBaseline.mill_id == user.mill_id,
+            MachineBaseline.user_id == mill.user_id,
             MachineBaseline.machine_id == m_id
         )
         result = await db.execute(stmt)
         baseline = result.scalars().first()
         
-        if baseline:
-            baseline.mean_current = mu
-            baseline.std_current = sigma
-            baseline.p95_current = p95
+        if baseline and baseline.data_points_count > 0:
+            # Pooled Mean and Pooled Variance
+            n_old = baseline.data_points_count
+            mu_old = baseline.mean_current
+            sigma_old = baseline.std_current
+            
+            n_total = n_old + n_new
+            
+            # Pooled Mean
+            mu_pooled = (n_old * mu_old + n_new * mu_new) / n_total
+            
+            # Pooled Variance (using Bessel's correction if needed, but here we assume population or consistent N)
+            # Var_pooled = [(n_old-1)s_old^2 + (n_new-1)s_new^2 + n_old(mu_old-mu_pooled)^2 + n_new(mu_new-mu_pooled)^2] / (n_old+n_new-1)
+            # Simplified for large N or consistency:
+            var_old = sigma_old ** 2
+            var_new = sigma_new ** 2
+            
+            # Weighted average of variances + variance of the means
+            term_old = n_old * (var_old + (mu_old - mu_pooled)**2)
+            term_new = n_new * (var_new + (mu_new - mu_pooled)**2)
+            var_pooled = (term_old + term_new) / n_total
+            sigma_pooled = var_pooled ** 0.5
+            
+            # P95 - weighted average is a simplification; ideally we'd re-calculate from raw data, 
+            # but for an aggregated baseline, we'll use the weighted max/avg approach.
+            p95_pooled = (n_old * baseline.p95_current + n_new * p95_new) / n_total
+            
+            baseline.mean_current = mu_pooled
+            baseline.std_current = sigma_pooled
+            baseline.p95_current = p95_pooled
+            baseline.data_points_count = n_total
         else:
-            baseline = MachineBaseline(
-                mill_id=user.mill_id,
-                machine_id=m_id,
-                mean_current=mu,
-                std_current=sigma,
-                p95_current=p95
-            )
-            db.add(baseline)
-        baselines_created += 1
+            if not baseline:
+                baseline = MachineBaseline(
+                    user_id=mill.user_id,
+                    mill_id=mill.mill_id,
+                    machine_id=m_id,
+                    mean_current=mu_new,
+                    std_current=sigma_new,
+                    p95_current=p95_new,
+                    data_points_count=n_new
+                )
+                db.add(baseline)
+            else:
+                baseline.mean_current = mu_new
+                baseline.std_current = sigma_new
+                baseline.p95_current = p95_new
+                baseline.data_points_count = n_new
 
-    user.has_uploaded_baseline = True
+        # Add to history
+        history = MachineBaselineHistory(
+            user_id=mill.user_id,
+            mill_id=mill.mill_id,
+            machine_id=m_id,
+            mean_current=baseline.mean_current,
+            std_current=baseline.std_current,
+            p95_current=baseline.p95_current,
+            data_points_count=n_new,
+            update_type="UPLOAD"
+        )
+        db.add(history)
+        baselines_updated += 1
+
+    mill.has_uploaded_baseline = True
     await db.commit()
     
     return {
         "status": "success",
-        "message": f"Baselines created/updated for {baselines_created} machines.",
+        "message": f"Baselines created/updated/merged for {baselines_updated} machines.",
         "machines": machines
     }
 
-@router.get("/baseline")
-async def get_baselines(
-    user: User = Depends(get_api_key_user),
+@router.get("/baseline/history")
+async def get_baseline_history(
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(MachineBaseline).where(MachineBaseline.mill_id == user.mill_id))
+    result = await db.execute(
+        select(MachineBaselineHistory)
+        .where(MachineBaselineHistory.user_id == mill.user_id)
+        .order_by(MachineBaselineHistory.timestamp.desc())
+    )
+    history = result.scalars().all()
+    return [
+        {
+            "machine_id": h.machine_id,
+            "mean_current": h.mean_current,
+            "std_current": h.std_current,
+            "p95_current": h.p95_current,
+            "data_points_count": h.data_points_count,
+            "update_type": h.update_type,
+            "timestamp": h.timestamp
+        } for h in history
+    ]
+
+@router.get("/baseline/{machine_id}/history")
+async def get_machine_baseline_history(
+    machine_id: str,
+    mill: Mill = Depends(get_api_key_mill),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(
+        select(MachineBaselineHistory)
+        .where(
+            MachineBaselineHistory.user_id == mill.user_id,
+            MachineBaselineHistory.machine_id == machine_id
+        )
+        .order_by(MachineBaselineHistory.timestamp.desc())
+    )
+    history = result.scalars().all()
+    return [
+        {
+            "mean_current": h.mean_current,
+            "std_current": h.std_current,
+            "p95_current": h.p95_current,
+            "data_points_count": h.data_points_count,
+            "update_type": h.update_type,
+            "timestamp": h.timestamp
+        } for h in history
+    ]
+
+@router.get("/baseline")
+async def get_baselines(
+    mill: Mill = Depends(get_api_key_mill),
+    db: AsyncSession = Depends(get_db)
+):
+    result = await db.execute(select(MachineBaseline).where(MachineBaseline.user_id == mill.user_id))
     baselines = result.scalars().all()
     return [
         {
@@ -460,12 +568,12 @@ async def get_baselines(
 async def update_baseline(
     machine_id: str,
     baseline_data: BaselineUpdate,
-    user: User = Depends(get_api_key_user),
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
         select(MachineBaseline).where(
-            MachineBaseline.mill_id == user.mill_id,
+            MachineBaseline.user_id == mill.user_id,
             MachineBaseline.machine_id == machine_id
         )
     )
@@ -483,12 +591,12 @@ async def update_baseline(
 @router.delete("/baseline/{machine_id}")
 async def delete_baseline(
     machine_id: str,
-    user: User = Depends(get_api_key_user),
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
         select(MachineBaseline).where(
-            MachineBaseline.mill_id == user.mill_id,
+            MachineBaseline.user_id == mill.user_id,
             MachineBaseline.machine_id == machine_id
         )
     )
@@ -502,12 +610,12 @@ async def delete_baseline(
 
 @router.get("/data/history")
 async def get_upload_history(
-    user: User = Depends(get_api_key_user),
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
     result = await db.execute(
         select(RawFile)
-        .where(RawFile.mill_id == user.mill_id)
+        .where(RawFile.user_id == mill.user_id)
         .order_by(RawFile.upload_timestamp.desc())
     )
     history = result.scalars().all()
@@ -525,11 +633,12 @@ async def get_summary(
     start_date: Optional[date] = None, 
     end_date: Optional[date] = None,
     machine_id: Optional[str] = None,
+    mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
     is_db_connected = await check_db_connection(db)
     
-    query = select(MachineDailyStats).where(MachineDailyStats.mill_id == mill_id)
+    query = select(MachineDailyStats).where(MachineDailyStats.user_id == mill.user_id)
     
     if start_date:
         query = query.where(MachineDailyStats.date >= start_date)

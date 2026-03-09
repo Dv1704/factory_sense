@@ -15,3 +15,16 @@ uvicorn_out.log
 # IDE
 .vscode/
 .idea/
+
+# Irrelevant & Deploy Scripts
+deploy.sh
+vps_deploy.sh
+deploymsh
+scripts/vps_deploy.sh
+test_*.py
+verify_*.py
+migrate_*.py
+repro_*.py
+generate_*.py
+create_tables.py
+final_analysis_report.py

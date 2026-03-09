@@ -18,6 +18,7 @@ class RawFile(Base):
     __tablename__ = "raw_files"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     mill_id = Column(String, index=True, nullable=False)
     filename = Column(String, nullable=False)
     upload_timestamp = Column(DateTime(timezone=True), server_default=func.now())
@@ -27,6 +28,7 @@ class MachineDailyStats(Base):
     __tablename__ = "machine_daily_stats"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     date = Column(Date, index=True, nullable=False)
     mill_id = Column(String, index=True, nullable=False)
     machine_id = Column(String, index=True, nullable=False)
@@ -58,19 +60,38 @@ class MachineBaseline(Base):
     __tablename__ = "machine_baselines"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     mill_id = Column(String, index=True, nullable=False)
     machine_id = Column(String, index=True, nullable=False)
     
     mean_current = Column(Float, nullable=False)
     std_current = Column(Float, nullable=False)
     p95_current = Column(Float, nullable=False)
+    data_points_count = Column(Integer, default=0, nullable=False)
     
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+class MachineBaselineHistory(Base):
+    __tablename__ = "machine_baseline_history"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    mill_id = Column(String, index=True, nullable=False)
+    machine_id = Column(String, index=True, nullable=False)
+    
+    mean_current = Column(Float, nullable=False)
+    std_current = Column(Float, nullable=False)
+    p95_current = Column(Float, nullable=False)
+    data_points_count = Column(Integer, nullable=False)
+    update_type = Column(String, nullable=False) # e.g., "UPLOAD", "MANUAL"
+    
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
 
 class MachineDataPoint(Base):
     __tablename__ = "machine_data_points"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     timestamp = Column(DateTime(timezone=True), index=True, nullable=False)
     mill_id = Column(String, index=True, nullable=False)
     machine_id = Column(String, index=True, nullable=False)
@@ -85,6 +106,7 @@ class Alert(Base):
     __tablename__ = "alerts"
 
     id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     mill_id = Column(String, index=True, nullable=False)
     machine_id = Column(String, index=True, nullable=True)
     type = Column(Enum(AlertType), nullable=False)

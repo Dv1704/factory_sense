@@ -53,8 +53,84 @@ sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_IP << 'EOF
     sleep 10
     
     echo "Running database migrations..."
-    # Add column if missing
-    $COMPOSE_CMD -f docker-compose.prod.yml exec -T db psql -U factory_user -d factorysense -c "ALTER TABLE users ADD COLUMN IF NOT EXISTS has_uploaded_baseline BOOLEAN DEFAULT FALSE;"
+    # Add columns and rename if missing
+    $COMPOSE_CMD -f docker-compose.prod.yml exec -T db psql -U factory_user -d factorysense -c "
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS has_uploaded_baseline BOOLEAN DEFAULT FALSE;
+        DO \$\$ 
+        BEGIN 
+            IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='machine_daily_stats' AND column_name='avg_current') THEN
+                ALTER TABLE machine_daily_stats RENAME COLUMN avg_current TO \"avg_current_A\";
+            END IF;
+        END \$\$;
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS max_current DOUBLE PRECISION;
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS std_current DOUBLE PRECISION;
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS reference_mean DOUBLE PRECISION;
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS reference_std DOUBLE PRECISION;
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS reference_p95 DOUBLE PRECISION;
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS health_score_details TEXT;
+
+        -- User Isolation Migrations
+        ALTER TABLE raw_files ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+        ALTER TABLE machine_daily_stats ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+        ALTER TABLE machine_baselines ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+        ALTER TABLE machine_baselines ADD COLUMN IF NOT EXISTS data_points_count INTEGER DEFAULT 0;
+        ALTER TABLE machine_data_points ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+        ALTER TABLE alerts ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+
+        -- Assign existing data to the first user found
+        DO \$\$
+        DECLARE 
+            default_uid INTEGER;
+        BEGIN
+            SELECT id INTO default_uid FROM users LIMIT 1;
+            IF default_uid IS NOT NULL THEN
+                UPDATE raw_files SET user_id = default_uid WHERE user_id IS NULL;
+                UPDATE machine_daily_stats SET user_id = default_uid WHERE user_id IS NULL;
+                UPDATE machine_baselines SET user_id = default_uid WHERE user_id IS NULL;
+                UPDATE machine_data_points SET user_id = default_uid WHERE user_id IS NULL;
+                UPDATE alerts SET user_id = default_uid WHERE user_id IS NULL;
+            END IF;
+        END \$\$;
+
+        -- Make user_id NOT NULL for all tables
+        ALTER TABLE raw_files ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE machine_daily_stats ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE machine_baselines ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE machine_data_points ALTER COLUMN user_id SET NOT NULL;
+        ALTER TABLE alerts ALTER COLUMN user_id SET NOT NULL;
+
+        -- Multi-Mill Migrations
+        CREATE TABLE IF NOT EXISTS mills (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            mill_id TEXT NOT NULL,
+            api_key TEXT UNIQUE,
+            has_uploaded_baseline BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+        -- Migrate users to mills
+        INSERT INTO mills (user_id, mill_id, api_key, has_uploaded_baseline, created_at)
+        SELECT id, mill_id, api_key, has_uploaded_baseline, created_at FROM users
+        WHERE api_key IS NOT NULL AND NOT EXISTS (SELECT 1 FROM mills WHERE mills.api_key = users.api_key);
+
+        -- Fix users table (remove NOT NULL from legacy columns)
+        ALTER TABLE users ALTER COLUMN mill_id DROP NOT NULL;
+        ALTER TABLE users ALTER COLUMN api_key DROP NOT NULL;
+
+        -- Add Machine Baseline History table if missing (should be handled by create_tables.py too, but safer here)
+        CREATE TABLE IF NOT EXISTS machine_baseline_history (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            mill_id TEXT NOT NULL,
+            machine_id TEXT NOT NULL,
+            mean_current DOUBLE PRECISION NOT NULL,
+            std_current DOUBLE PRECISION NOT NULL,
+            p95_current DOUBLE PRECISION NOT NULL,
+            data_points_count INTEGER NOT NULL,
+            update_type TEXT NOT NULL,
+            timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+        );
+    "
     # Create missing tables
     $COMPOSE_CMD -f docker-compose.prod.yml exec -T web python create_tables.py
     

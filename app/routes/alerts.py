@@ -5,9 +5,9 @@ from sqlalchemy import update
 from typing import List
 
 from app.core.database import get_db
-from app.models.user import User
+from app.models.user import User, Mill
 from app.models.mill_data import Alert
-from app.routes.data import get_api_key_user
+from app.routes.data import get_api_key_mill
 
 router = APIRouter()
 
@@ -16,11 +16,11 @@ async def get_alerts(
     x_api_key: str = Header(...),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await get_api_key_user(x_api_key, db)
+    mill = await get_api_key_mill(x_api_key, db)
     
     result = await db.execute(
         select(Alert)
-        .where(Alert.mill_id == user.mill_id, Alert.is_acknowledged == False)
+        .where(Alert.user_id == mill.user_id, Alert.is_acknowledged == False)
         .order_by(Alert.timestamp.desc())
     )
     alerts = result.scalars().all()
@@ -41,11 +41,11 @@ async def acknowledge_alert(
     x_api_key: str = Header(...),
     db: AsyncSession = Depends(get_db)
 ):
-    user = await get_api_key_user(x_api_key, db)
+    mill = await get_api_key_mill(x_api_key, db)
     
     # Check if alert exists and belongs to this mill
     result = await db.execute(
-        select(Alert).where(Alert.id == alert_id, Alert.mill_id == user.mill_id)
+        select(Alert).where(Alert.id == alert_id, Alert.user_id == mill.user_id)
     )
     alert = result.scalars().first()
     

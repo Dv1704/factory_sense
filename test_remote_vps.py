@@ -62,6 +62,36 @@ def test_remote_vps():
         m1 = summary['machines'][0]
         print(f"Machine M1: Health {m1['health_score']} | Insights: {m1['insights']}")
 
+        # 6. Check Baseline History
+        print("\n[6] Checking Baseline History...")
+        resp = client.get(f"{VPS_URL}/api/v1/baseline/history", headers=headers)
+        history = resp.json()
+        print(f"History records found: {len(history)}")
+        assert len(history) > 0
+        print(f"Latest update type: {history[0]['update_type']} at {history[0]['timestamp']}")
+
+        # 7. Test Multi-Mill Independence
+        print("\n[7] Testing Multi-Mill Independence...")
+        # Create a second mill for the same email/user? 
+        # Actually, register currently creates a new user. 
+        # To test multi-mill for one user, we'd need an endpoint to add a mill, 
+        # but for now, we'll just verify that two different API keys are isolated.
+        
+        email2 = f"remote_test_2_{int(time.time())}@factorysense.ai"
+        print(f"Registering second user {email2}...")
+        resp2 = client.post(f"{VPS_URL}/api/v1/auth/register", json={
+            "email": email2,
+            "password": "securepassword",
+            "mill_id": "REMOTE_TEST_2"
+        })
+        api_key2 = resp2.json()["api_key"]
+        headers2 = {"x-api-key": api_key2}
+        
+        # Verify REMOTE_TEST_2 has no data
+        resp = client.get(f"{VPS_URL}/api/v1/mill/REMOTE_TEST_2/summary", headers=headers2)
+        assert len(resp.json()['machines']) == 0
+        print("Second mill is empty as expected.")
+
     print("\n[COMPLETE] Remote verification successful!")
 
 if __name__ == "__main__":

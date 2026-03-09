@@ -9,7 +9,7 @@ from typing import Optional
 import secrets
 
 from app.core.database import get_db
-from app.models.user import User
+from app.models.user import User, Mill
 from app.core.config import settings
 
 router = APIRouter()
@@ -49,20 +49,28 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     if result.scalars().first():
         raise HTTPException(status_code=400, detail="Email already registered")
     
-    # Generate API Key
-    api_key = f"fsa_{user.mill_id}_{secrets.token_hex(16)}"
-    
+    # Create User
     new_user = User(
         email=user.email,
-        password_hash=get_password_hash(user.password),
+        password_hash=get_password_hash(user.password)
+    )
+    db.add(new_user)
+    await db.flush() # Get user.id
+    
+    # Generate API Key for the first mill
+    api_key = f"fsa_{user.mill_id}_{secrets.token_hex(16)}"
+    
+    # Create first Mill
+    new_mill = Mill(
+        user_id=new_user.id,
         mill_id=user.mill_id,
         api_key=api_key
     )
-    db.add(new_user)
+    db.add(new_mill)
     await db.commit()
     await db.refresh(new_user)
     
-    return {"status": "success", "api_key": api_key, "message": "User created. Save this API key!"}
+    return {"status": "success", "api_key": api_key, "message": "User created with initial mill. Save this API key!"}
 
 @router.post("/login", response_model=Token)
 async def login(user: UserRegister, db: AsyncSession = Depends(get_db)):
@@ -78,10 +86,17 @@ async def login(user: UserRegister, db: AsyncSession = Depends(get_db)):
         )
     
     access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    
+    # Get first mill for this user
+    mill_result = await db.execute(select(Mill).where(Mill.user_id == db_user.id))
+    first_mill = mill_result.scalars().first()
+    api_key = first_mill.api_key if first_mill else None
+    mill_id = first_mill.mill_id if first_mill else "N/A"
+
     access_token = create_access_token(
-        data={"sub": db_user.email, "mill_id": db_user.mill_id}, expires_delta=access_token_expires
+        data={"sub": db_user.email, "mill_id": mill_id}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer", "api_key": db_user.api_key}
+    return {"access_token": access_token, "token_type": "bearer", "api_key": api_key}
 
 @router.post("/logout")
 async def logout():
