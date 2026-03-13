@@ -1,7 +1,12 @@
-from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Boolean, ForeignKey, Enum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+import enum
 from app.core.database import Base
+
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    MANAGER = "manager"
 
 class User(Base):
     __tablename__ = "users"
@@ -9,6 +14,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
+    role = Column(Enum(UserRole), default=UserRole.MANAGER, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     mills = relationship("Mill", back_populates="owner", cascade="all, delete-orphan")

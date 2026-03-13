@@ -5,8 +5,8 @@ import pandas as pd
 
 from app.main import app
 from app.core.database import get_db
-from app.routes.data import get_api_key_user
-from app.models.user import User
+from app.routes.data import get_api_key_mill
+from app.models.user import User, Mill
 from app.models.mill_data import MachineDailyStats, Alert, BearingRisk, AlertType
 
 client = TestClient(app)
@@ -30,8 +30,17 @@ def mock_db_and_auth(monkeypatch):
 
         async def execute(self, query, *args, **kwargs):
             q_str = str(query).lower()
+            if "mills" in q_str:
+                return MockResult([Mill(id=1, user_id=1, mill_id="TEST", api_key="fsa_TEST_key", has_uploaded_baseline=True)])
             if "users" in q_str:
-                return MockResult([User(id=1, email="test@example.com", mill_id="TEST", api_key="fsa_TEST_key")])
+                return MockResult([User(id=1, email="test@example.com")])
+            if "machine_baselines" in q_str:
+                from app.models.mill_data import MachineBaseline
+                return MockResult([
+                    MachineBaseline(machine_id="1BK1", user_id=1, mill_id="TEST", mean_current=10.0, std_current=1.0, p95_current=12.0),
+                    MachineBaseline(machine_id="M1", user_id=1, mill_id="TEST", mean_current=10.0, std_current=1.0, p95_current=12.0),
+                    MachineBaseline(machine_id="M2", user_id=1, mill_id="TEST", mean_current=10.0, std_current=1.0, p95_current=12.0)
+                ])
             if "alerts" in q_str:
                 if "count(" in q_str:
                     return MockResult([1])
@@ -53,6 +62,7 @@ def mock_db_and_auth(monkeypatch):
 
         def add(self, obj): self.added.append(obj)
         async def commit(self): self.committed = True
+        async def flush(self): pass
         async def refresh(self, obj): self.refreshed = True
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
@@ -62,11 +72,11 @@ def mock_db_and_auth(monkeypatch):
     async def override_get_db():
         yield mock_db
         
-    async def override_get_user(*args, **kwargs):
-        return User(id=1, email="test@example.com", mill_id="TEST", api_key="fsa_TEST_key")
+    async def override_get_mill():
+        return Mill(id=1, user_id=1, mill_id="TEST", api_key="fsa_TEST_key", has_uploaded_baseline=True)
         
     app.dependency_overrides[get_db] = override_get_db
-    app.dependency_overrides[get_api_key_user] = override_get_user
+    app.dependency_overrides[get_api_key_mill] = override_get_mill
     
     # Mock AsyncSessionLocal in app.core.database to handle background tasks
     monkeypatch.setattr("app.core.database.AsyncSessionLocal", lambda: mock_db)
@@ -95,8 +105,8 @@ def test_auth_register_success(mock_db_and_auth, monkeypatch):
 
 def test_auth_login_fail(mock_db_and_auth, monkeypatch):
     # Remove override to test real-ish logic (which still calls mock DB)
-    if get_api_key_user in app.dependency_overrides:
-        del app.dependency_overrides[get_api_key_user]
+    if get_api_key_mill in app.dependency_overrides:
+        del app.dependency_overrides[get_api_key_mill]
     
     # Mock user check to return None
     async def mock_execute_none(*args, **kwargs):
@@ -108,7 +118,7 @@ def test_auth_login_fail(mock_db_and_auth, monkeypatch):
 
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "wrong@example.com", "password": "password123", "mill_id": "TEST"}
+        data={"username": "wrong@example.com", "password": "password123"}
     )
     assert response.status_code == 401
 

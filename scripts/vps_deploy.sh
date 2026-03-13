@@ -56,6 +56,7 @@ sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_IP << 'EOF
     # Add columns and rename if missing
     $COMPOSE_CMD -f docker-compose.prod.yml exec -T db psql -U factory_user -d factorysense -c "
         ALTER TABLE users ADD COLUMN IF NOT EXISTS has_uploaded_baseline BOOLEAN DEFAULT FALSE;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'manager';
         DO \$\$ 
         BEGIN 
             IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='machine_daily_stats' AND column_name='avg_current') THEN
@@ -130,10 +131,42 @@ sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no $VPS_USER@$VPS_IP << 'EOF
             update_type TEXT NOT NULL,
             timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
         );
+        CREATE TABLE IF NOT EXISTS processing_tasks (
+            id SERIAL PRIMARY KEY,
+            task_id TEXT UNIQUE NOT NULL,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            mill_id TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            status TEXT NOT NULL,
+            progress DOUBLE PRECISION DEFAULT 0.0,
+            message TEXT,
+            task_type TEXT NOT NULL,
+            records_processed INTEGER DEFAULT 0,
+            total_records INTEGER DEFAULT 0,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+            started_at TIMESTAMP WITH TIME ZONE,
+            completed_at TIMESTAMP WITH TIME ZONE,
+            estimated_seconds_remaining DOUBLE PRECISION
+        );
     "
     # Create missing tables
     $COMPOSE_CMD -f docker-compose.prod.yml exec -T web python create_tables.py
     
+    # Setup regular automated backups (Daily at 2 AM)
+    echo "Setting up DB backup cron job..."
+    BACKUP_SCRIPT="/root/FactorySenseAI/backup_db.sh"
+    echo "#!/bin/bash" > \$BACKUP_SCRIPT
+    echo "mkdir -p /root/FactorySenseAI/backups" >> \$BACKUP_SCRIPT
+    echo "cd /root/FactorySenseAI" >> \$BACKUP_SCRIPT
+    echo "$COMPOSE_CMD -f docker-compose.prod.yml exec -T db pg_dump -U factory_user factorysense > backups/db_backup_\$(date +\%F).sql" >> \$BACKUP_SCRIPT
+    echo "find /root/FactorySenseAI/backups -type f -name '*.sql' -mtime +14 -exec rm {} \;" >> \$BACKUP_SCRIPT
+    chmod +x \$BACKUP_SCRIPT
+    
+    (crontab -l 2>/dev/null | grep -v "backup_db.sh"; echo "0 2 * * * \$BACKUP_SCRIPT") | crontab -
+
+    # Setup Data Retention Policy execution (Daily at 3 AM)
+    (crontab -l 2>/dev/null | grep -v "retention_policy.py"; echo "0 3 * * * $COMPOSE_CMD -f /root/FactorySenseAI/docker-compose.prod.yml exec -T web python scripts/retention_policy.py") | crontab -
+
     docker ps
 EOF
 

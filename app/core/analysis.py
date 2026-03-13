@@ -70,10 +70,19 @@ def calculate_health_score_v2(
     score = 100.0 - (load_penalty + peak_penalty + drift_penalty)
     score = max(0.0, min(100.0, score))
     
+    category = "Critical"
+    if score >= 90:
+        category = "Good"
+    elif score >= 70:
+        category = "Watch"
+    elif score >= 50:
+        category = "Risk"
+    
     details = {
         "load_penalty": load_penalty,
         "peak_penalty": peak_penalty,
-        "drift_penalty": drift_penalty
+        "drift_penalty": drift_penalty,
+        "category": category
     }
     
     return score, details
@@ -137,9 +146,28 @@ def assess_bearing_risk(history: List[float]) -> BearingRisk:
     
     if mu > 0:
         ratio = max_val / mu
-        if ratio > 2.0:
+        if ratio > 2.5: # Increased threshold for 'High'
             return BearingRisk.HIGH
-        if ratio > 1.5:
+        if ratio > 1.8:
             return BearingRisk.WARNING
             
     return BearingRisk.NORMAL
+
+def detect_drift(history: List[float]) -> bool:
+    """
+    Detect if there is an increasing trend in average current over time.
+    Requires at least 5 days of data.
+    """
+    if not history or len(history) < 5:
+        return False
+    
+    # Simple split-mean comparison
+    mid = len(history) // 2
+    first_half = np.mean(history[:mid])
+    second_half = np.mean(history[mid:])
+    
+    # If the second half is significantly higher than the first (e.g. 15%)
+    if first_half > 0 and (second_half / first_half) > 1.15:
+        return True
+        
+    return False

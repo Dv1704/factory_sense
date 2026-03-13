@@ -16,3 +16,4 @@ httpx
 python-dotenv
 pyyaml
 email-validator
+sentry-sdk

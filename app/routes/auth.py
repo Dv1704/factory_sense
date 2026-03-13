@@ -3,16 +3,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
-from jose import jwt
+from jose import jwt, JWTError
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
 from typing import Optional
 import secrets
 
 from app.core.database import get_db
-from app.models.user import User, Mill
+from app.models.user import User, Mill, UserRole
 from app.core.config import settings
 
 router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
@@ -20,6 +22,7 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     mill_id: str
+    role: Optional[UserRole] = UserRole.MANAGER
 
 class Token(BaseModel):
     access_token: str
@@ -42,6 +45,30 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
     return encoded_jwt
 
+async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
+        email: str = payload.get("sub")
+        if email is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    result = await db.execute(select(User).where(User.email == email))
+    user = result.scalars().first()
+    if user is None:
+        raise credentials_exception
+    return user
+
+async def get_current_admin_user(current_user: User = Depends(get_current_user)):
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+    return current_user
+
 @router.post("/register", response_model=dict)
 async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     # Check if user exists
@@ -52,7 +79,8 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     # Create User
     new_user = User(
         email=user.email,
-        password_hash=get_password_hash(user.password)
+        password_hash=get_password_hash(user.password),
+        role=user.role
     )
     db.add(new_user)
     await db.flush() # Get user.id
@@ -73,12 +101,11 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     return {"status": "success", "api_key": api_key, "message": "User created with initial mill. Save this API key!"}
 
 @router.post("/login", response_model=Token)
-async def login(user: UserRegister, db: AsyncSession = Depends(get_db)):
-     # Simplified login for MVP, normally use OAuth2PasswordRequestForm
-    result = await db.execute(select(User).where(User.email == user.email))
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == form_data.username))
     db_user = result.scalars().first()
     
-    if not db_user or not verify_password(user.password, db_user.password_hash):
+    if not db_user or not verify_password(form_data.password, db_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -106,3 +133,11 @@ async def logout():
     Server-side invalidation could be implemented with a blocklist if needed.
     """
     return {"status": "success", "message": "Successfully logged out"}
+
+@router.get("/me")
+async def read_users_me(current_user: User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "role": current_user.role.value
+    }

@@ -2,8 +2,8 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app.core.database import get_db
-from app.routes.data import get_api_key_user
-from app.models.user import User
+from app.routes.data import get_api_key_mill
+from app.models.user import User, Mill
 from app.models.mill_data import MachineDailyStats, Alert, BearingRisk, AlertType
 import pandas as pd
 import io
@@ -30,14 +30,23 @@ def mock_db(monkeypatch):
         async def execute(self, query, *args, **kwargs):
             q_str = str(query).lower()
             if "users" in q_str:
-                return MockResult([User(id=1, email="test@example.com", mill_id="TEST", api_key="fsa_TEST_key", password_hash="hashed_pw")])
-            return MockResult()
+                return MockResult([User(id=1, email="test@example.com", password_hash="hashed_pw")])
+            if "mills" in q_str:
+                return MockResult([Mill(id=1, user_id=1, mill_id="TEST", api_key="fsa_TEST_key", has_uploaded_baseline=True)])
+            if "machine_baselines" in q_str:
+                from app.models.mill_data import MachineBaseline
+                return MockResult([
+                    MachineBaseline(machine_id="1BK1", user_id=1, mill_id="TEST", mean_current=10.0, std_current=1.0, p95_current=12.0),
+                    MachineBaseline(machine_id="M1", user_id=1, mill_id="TEST", mean_current=10.0, std_current=1.0, p95_current=12.0),
+                    MachineBaseline(machine_id="M2", user_id=1, mill_id="TEST", mean_current=10.0, std_current=1.0, p95_current=12.0)
+                ])
 
         def add(self, obj): self.added.append(obj)
         async def commit(self): self.committed = True
         async def refresh(self, obj): self.refreshed = True
         async def __aenter__(self): return self
         async def __aexit__(self, *args): pass
+        async def flush(self): pass
 
     mock_db_obj = MockDB()
     
@@ -56,15 +65,21 @@ def test_login_returns_api_key(mock_db, monkeypatch):
     
     response = client.post(
         "/api/v1/auth/login",
-        json={"email": "test@example.com", "password": "password123", "mill_id": "TEST"}
+        data={"username": "test@example.com", "password": "password123"}
     )
     assert response.status_code == 200
     data = response.json()
-    assert "api_key" in data
+    assert "access_token" in data
     assert data["api_key"] == "fsa_TEST_key"
 
 def test_upload_csv_robustness_missing_cols(mock_db):
     headers = {"x-api-key": "fsa_TEST_key"}
+    
+    async def override_get_mill():
+        from app.models.user import Mill
+        return Mill(id=1, user_id=1, mill_id="TEST", api_key="test_key", has_uploaded_baseline=True)
+    app.dependency_overrides[get_api_key_mill] = override_get_mill
+
     # Missing 'current_A'
     csv_content = "timestamp,mill_id,machine_id,motor_state\n2026-02-25T12:00:00Z,TEST,1BK1,RUNNING"
     files = {"file": ("data.csv", csv_content, "text/csv")}
@@ -117,4 +132,4 @@ def test_upload_csv_partial_error(mock_db, monkeypatch):
     data = response.json()
     assert data["machines_processed"] == 1 # M2 should be processed, M1 failed
     assert len(data["errors"]) == 1
-    assert "Error processing machine M1" in data["errors"][0]
+    assert "M1 Error" in data["errors"][0]

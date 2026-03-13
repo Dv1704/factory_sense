@@ -93,7 +93,7 @@ async def get_machines(
     query = (
         select(MachineDailyStats)
         .join(subquery, (MachineDailyStats.machine_id == subquery.c.machine_id) & (MachineDailyStats.date == subquery.c.max_date))
-        .where(MachineDailyStats.user_id == user.id)
+        .where(MachineDailyStats.user_id == mill.user_id)
     )
     
     result = await db.execute(query)
@@ -142,10 +142,14 @@ async def get_machine_trends(
     mill = await get_api_key_mill(x_api_key, db)
     
     days = 7
+    window_sizes = [7]
     if range == "30d":
         days = 30
+        window_sizes = [7, 30]
     
-    start_date = date.today() - timedelta(days=days)
+    # Fetch extra days to compute rolling averages accurately
+    fetch_days = days + max(window_sizes)
+    start_date = date.today() - timedelta(days=fetch_days)
     
     query = (
         select(MachineDailyStats)
@@ -160,10 +164,39 @@ async def get_machine_trends(
     result = await db.execute(query)
     trends = result.scalars().all()
     
-    return [
-        {
-            "date": t.date,
-            "energy_kwh": round(t.total_energy_kwh, 2),
-            "carbon_kg": round(t.total_co2_kg, 2)
-        } for t in trends
-    ]
+    if not trends:
+        return []
+        
+    import pandas as pd
+    df = pd.DataFrame([{
+        "date": t.date,
+        "energy_kwh": t.total_energy_kwh,
+        "carbon_kg": t.total_co2_kg,
+        "avg_current": t.avg_current_A or 0.0,
+        "health_score": t.health_score or 0.0
+    } for t in trends])
+    
+    # Calculate rolling averages
+    df['rolling_7d_current'] = df['avg_current'].rolling(window=7, min_periods=1).mean()
+    if 30 in window_sizes:
+        df['rolling_30d_current'] = df['avg_current'].rolling(window=30, min_periods=1).mean()
+    else:
+        df['rolling_30d_current'] = None
+        
+    # Filter to requested range
+    expected_start = date.today() - timedelta(days=days)
+    df_filtered = df[df['date'] >= expected_start]
+    
+    response = []
+    for _, row in df_filtered.iterrows():
+        response.append({
+            "date": row['date'],
+            "energy_kwh": round(row['energy_kwh'], 2),
+            "carbon_kg": round(row['carbon_kg'], 2),
+            "avg_current": round(row['avg_current'], 2),
+            "health_score": round(row['health_score'], 1),
+            "rolling_7d_current": round(row['rolling_7d_current'], 2) if pd.notnull(row['rolling_7d_current']) else None,
+            "rolling_30d_current": round(row['rolling_30d_current'], 2) if pd.notnull(row['rolling_30d_current']) else None
+        })
+        
+    return response

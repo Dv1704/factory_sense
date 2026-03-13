@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     secret_key: str = "CHANGE_ME_IN_PRODUCTION"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
+    sentry_dsn: Optional[str] = None
 
     class Config:
         env_file = ".env"

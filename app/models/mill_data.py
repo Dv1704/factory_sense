@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Enum, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, Date, Enum, Boolean, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.core.database import Base
@@ -14,6 +14,12 @@ class AlertType(str, enum.Enum):
     WARNING = "WARNING"
     CO2_INCREASE = "CO2_INCREASE"
 
+class ProcessingStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
 class RawFile(Base):
     __tablename__ = "raw_files"
 
@@ -26,6 +32,9 @@ class RawFile(Base):
 
 class MachineDailyStats(Base):
     __tablename__ = "machine_daily_stats"
+    __table_args__ = (
+        Index('ix_machine_daily_stats_user_machine_date', 'user_id', 'machine_id', 'date'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
@@ -58,6 +67,9 @@ class MachineDailyStats(Base):
 
 class MachineBaseline(Base):
     __tablename__ = "machine_baselines"
+    __table_args__ = (
+        Index('ix_machine_baselines_user_machine', 'user_id', 'machine_id'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
@@ -89,6 +101,9 @@ class MachineBaselineHistory(Base):
 
 class MachineDataPoint(Base):
     __tablename__ = "machine_data_points"
+    __table_args__ = (
+        Index('ix_machine_data_points_user_machine_time', 'user_id', 'machine_id', 'timestamp'),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
@@ -113,3 +128,27 @@ class Alert(Base):
     message = Column(String, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
     is_acknowledged = Column(Boolean, default=False)
+
+class ProcessingTask(Base):
+    __tablename__ = "processing_tasks"
+
+    id = Column(Integer, primary_key=True, index=True)
+    task_id = Column(String, unique=True, index=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
+    mill_id = Column(String, index=True, nullable=False)
+    filename = Column(String, nullable=False)
+    
+    status = Column(Enum(ProcessingStatus), default=ProcessingStatus.PENDING, nullable=False)
+    progress = Column(Float, default=0.0)
+    message = Column(String, nullable=True)
+    
+    # Task specific details
+    task_type = Column(String, nullable=False) # e.g., "OPERATIONAL_DATA", "BASELINE_DATA"
+    records_processed = Column(Integer, default=0)
+    total_records = Column(Integer, default=0)
+    
+    # Timing
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+    estimated_seconds_remaining = Column(Float, nullable=True)
