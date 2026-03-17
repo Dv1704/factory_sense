@@ -1,23 +1,20 @@
 import pandas as pd
 import numpy as np
 import io
-import gzip
-import os
 import json
 import logging
 import time
-from datetime import datetime, timedelta
-from typing import List, Optional
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime
+from typing import Optional
 from sqlalchemy.future import select
-from sqlalchemy import insert, update, text
+from sqlalchemy import insert, update
 
 from app.models.mill_data import (
     MachineDataPoint, MachineDailyStats, Alert, AlertType, 
     MachineBaseline, MachineBaselineHistory, ProcessingTask, ProcessingStatus, BearingRisk
 )
 from app.models.user import Mill
-from app.core import physics, analysis
+from app.core import analysis
 from app.core.validation import validate_and_clean_csv
 from app.core.config import settings
 

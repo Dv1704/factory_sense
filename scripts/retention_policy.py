@@ -1,9 +1,7 @@
 import asyncio
 import os
-import glob
 from datetime import datetime, timedelta
 import logging
-from sqlalchemy.future import select
 from sqlalchemy import delete
 from app.core.database import AsyncSessionLocal
 from app.models.mill_data import MachineDataPoint, RawFile

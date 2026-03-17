@@ -12,8 +12,10 @@ pandas
 numpy
 pytest
 pytest-asyncio
+aiosmtpd
 httpx
 python-dotenv
 pyyaml
 email-validator
+jinja2
 sentry-sdk

@@ -4,8 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import engine, Base
 from app.routes import auth, data, dashboard, alerts, admin
-from app.models.user import User
-from app.models.mill_data import RawFile, MachineDailyStats, MachineDataPoint, Alert
 
 tags_metadata = [
     {
@@ -60,7 +58,6 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     async with engine.begin() as conn:
-        # Create tables (for MVP only - usually use Alembic)
         await conn.run_sync(Base.metadata.create_all)
 
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Auth"])

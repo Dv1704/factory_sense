@@ -1,11 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import update
-from typing import List
 
 from app.core.database import get_db
-from app.models.user import User, Mill
 from app.models.mill_data import Alert
 from app.routes.data import get_api_key_mill
 
@@ -18,11 +15,9 @@ async def get_alerts(
 ):
     mill = await get_api_key_mill(x_api_key, db)
     
-    print(f"DEBUG: Alert attributes: {dir(Alert)}")
-    print(f"DEBUG: mill object: {mill}")
     result = await db.execute(
         select(Alert)
-        .where(Alert.mill_id == mill.id, Alert.is_acknowledged == False)
+        .where(Alert.mill_id == mill.id, Alert.is_acknowledged.is_(False))
         .order_by(Alert.timestamp.desc())
     )
     alerts = result.scalars().all()

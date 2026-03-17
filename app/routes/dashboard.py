@@ -1,16 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
-from typing import List, Optional
-from datetime import date, datetime, timedelta
+from typing import Optional
+from datetime import date, timedelta
 import json
 
 from app.core.database import get_db
-from app.models.user import User, Mill
-from app.models.mill_data import MachineDailyStats, Alert, MachineDataPoint, BearingRisk
+from app.models.user import User
+from app.models.mill_data import MachineDailyStats, Alert, BearingRisk
 from app.routes.data import get_api_key_mill, MACHINE_SPECS
-from app.routes.auth import require_owner, require_manager
+from app.routes.auth import require_owner
 
 router = APIRouter()
 
@@ -19,19 +19,14 @@ async def get_machine_specs(
     x_api_key: str = Header(...),
     db: AsyncSession = Depends(get_db)
 ):
-    """Returns the safety thresholds and metadata for all machines."""
-    await get_api_key_mill(x_api_key, db) # Validate API key and owner verification
-    
-    # Remove max_a from specs before returning
-    clean_specs = {k: {"name": v["name"]} for k, v in MACHINE_SPECS.items()}
-    return clean_specs
+    await get_api_key_mill(x_api_key, db)
+    return {k: {"name": v["name"]} for k, v in MACHINE_SPECS.items()}
 
 @router.get("/billing")
 async def get_billing_info(
     current_user: User = Depends(require_owner),
     db: AsyncSession = Depends(get_db)
 ):
-    """Owner-only endpoint for billing information."""
     return {
         "status": "active",
         "plan": "Enterprise Pro",
@@ -48,7 +43,6 @@ async def get_dashboard_summary(
     mill = await get_api_key_mill(x_api_key, db)
     
     if not date:
-        # Get latest date available for this mill
         latest_date_query = select(func.max(MachineDailyStats.date)).where(MachineDailyStats.mill_id == mill.id)
         result = await db.execute(latest_date_query)
         date = result.scalar()
@@ -69,10 +63,9 @@ async def get_dashboard_summary(
     result = await db.execute(stats_query)
     stats = result.scalars().all()
 
-    # Query active alerts
     alerts_query = select(func.count(Alert.id)).where(
         Alert.mill_id == mill.id,
-        Alert.is_acknowledged == False
+        Alert.is_acknowledged.is_(False)
     )
     result = await db.execute(alerts_query)
     alerts_count = result.scalar() or 0
@@ -128,7 +121,7 @@ async def get_machines(
         if s.health_score_details:
             try:
                 health_breakdown = json.loads(s.health_score_details)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 pass
 
         machines.append({

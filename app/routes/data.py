@@ -1,59 +1,26 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import insert
-from typing import List, Optional
-import pandas as pd
-import io
-import gzip
-import shutil
-import os
-from datetime import date, datetime, timedelta
+from typing import Optional
+from datetime import date, datetime
 import json
 
 from sqlalchemy.sql import text
 import logging
 import uuid
-from pydantic import BaseModel, Field
 
 from app.core.database import get_db, AsyncSessionLocal
 from app.models.user import User, Mill
 from app.models.mill_data import (
-    RawFile, MachineDailyStats, BearingRisk, MachineDataPoint, 
-    Alert, AlertType, MachineBaseline, MachineBaselineHistory,
+    RawFile, MachineDailyStats, MachineBaseline, MachineBaselineHistory,
     ProcessingTask, ProcessingStatus
 )
-from app.core.config import settings
-from app.core import physics, analysis
-from app.core.validation import validate_and_clean_csv
+from app.core import analysis
+from app.schemas.data import BaselineUpdate, TaskResponse, UploadResponse
+from app.routes.auth import require_manager
 from app.core.tasks import process_operational_data, process_baseline_data
 
 logger = logging.getLogger(__name__)
-
-from app.routes.auth import require_manager, require_owner
-
-# --- Models ---
-
-class BaselineUpdate(BaseModel):
-    mean_current: float = Field(..., description="Mean current in Amperes")
-    std_current: float = Field(..., description="Standard deviation of current")
-    p95_current: float = Field(..., description="95th percentile of current")
-
-class TaskResponse(BaseModel):
-    task_id: str
-    status: ProcessingStatus
-    progress: float
-    message: Optional[str] = None
-    estimated_seconds_remaining: Optional[float] = None
-    records_processed: int = 0
-    total_records: int = 0
-
-class UploadResponse(BaseModel):
-    task_id: str
-    message: str
-    estimated_initial_seconds: float
-
-# --- Shared Specs ---
 
 MACHINE_SPECS = {
     "1BK1": {"name": "1st Break Roll"},
@@ -73,8 +40,6 @@ MACHINE_SPECS = {
 }
 
 router = APIRouter()
-
-# --- Helper Functions ---
 
 async def check_db_connection(db: AsyncSession) -> bool:
     try:
@@ -133,8 +98,6 @@ async def _process_baseline_request(background_tasks, file, mill, db, task_type)
         "message": f"{task_type.replace('_', ' ').capitalize()} received. Processing started in background.",
         "estimated_initial_seconds": 3.0
     }
-
-# --- Core CSV Upload Endpoints (High Priority) ---
 
 @router.post(
     "/upload",
@@ -219,8 +182,6 @@ async def upload_baseline(
 ):
     return await _process_baseline_request(background_tasks, file, mill, db, "INITIAL_BASELINE_LOAD")
 
-# --- Task Tracking ---
-
 @router.get(
     "/task/{task_id}",
     response_model=TaskResponse,
@@ -244,8 +205,6 @@ async def get_task_status(
         
     return task
 
-# --- Data History & Retrieval ---
-
 @router.get("/data/history", summary="View Upload History")
 async def get_upload_history(
     mill: Mill = Depends(get_api_key_mill),
@@ -264,8 +223,6 @@ async def get_upload_history(
             "status": h.status
         } for h in history
     ]
-
-# --- Baseline Management ---
 
 @router.get("/baseline", summary="List Current Baselines")
 async def get_baselines(
@@ -377,8 +334,6 @@ async def delete_baseline(
     await db.commit()
     return {"status": "success", "message": f"Baseline for {machine_id} deleted"}
 
-# --- Analytics Summary ---
-
 @router.get("/mill/{mill_id}/summary", summary="Get Mill Operational Summary")
 async def get_summary(
     mill_id: str, 
@@ -423,7 +378,7 @@ async def get_summary(
         if s.health_score_details:
             try:
                 health_breakdown = json.loads(s.health_score_details)
-            except:
+            except (json.JSONDecodeError, TypeError):
                 pass
 
         machine_analytics.append({

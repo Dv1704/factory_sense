@@ -1,34 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from typing import List
 
 from app.core.database import get_db
 from app.models.user import User, Mill, UserRole
 from app.models.mill_data import RawFile
 from app.routes.auth import get_current_admin_user, get_password_hash
-from pydantic import BaseModel, EmailStr
+from app.schemas.admin import UserCreate, UserUpdate, MillCreate, StatsUpdate
 import secrets
 
 router = APIRouter()
-
-class UserCreate(BaseModel):
-    email: EmailStr
-    password: str
-    role: UserRole
-
-class UserUpdate(BaseModel):
-    password: str
-
-class MillCreate(BaseModel):
-    mill_tag: str
-    mill_name: str
-    user_id: int
-
-class StatsUpdate(BaseModel):
-    health_score: float
-    bearing_risk: str
-    message: str # Why it was corrected
 
 @router.get("/users")
 async def list_users(admin: User = Depends(get_current_admin_user), db: AsyncSession = Depends(get_db)):

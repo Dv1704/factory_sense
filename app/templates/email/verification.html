@@ -1,0 +1,10 @@
+{% extends "email/base.html" %}
+
+{% block content %}
+<h2>Welcome to FactorySenseAI!</h2>
+<p>Thank you for joining our platform. Please use the following token to verify your email address and activate your account:</p>
+
+<div class="token">{{ token }}</div>
+
+<p>If you didn't create an account, you can safely ignore this email.</p>
+{% endblock %}

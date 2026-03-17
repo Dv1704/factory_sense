@@ -1,5 +1,5 @@
 import pandas as pd
-from typing import Tuple, List, Dict
+from typing import Tuple, List
 from fastapi import HTTPException
 import logging
 

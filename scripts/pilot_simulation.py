@@ -2,8 +2,6 @@ import httpx
 import time
 import secrets
 from datetime import datetime, timedelta
-import pandas as pd
-import io
 
 BASE_URL = "http://144.91.111.151:8000/api/v1"
 PILOT_MILL_ID = f"PILOT_{secrets.token_hex(3).upper()}"

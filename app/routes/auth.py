@@ -1,119 +1,24 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
-from pydantic import BaseModel, EmailStr
-from passlib.context import CryptContext
-from jose import jwt, JWTError
-from fastapi.security import OAuth2PasswordRequestForm, HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import OAuth2PasswordRequestForm
 from datetime import datetime, timedelta
-from typing import Optional, Union, List
 import secrets
 
 from app.core.database import get_db
 from app.models.user import User, Mill, UserRole, Invitation
 from app.core.config import settings
 from app.utility.email import EmailService
+from app.schemas.auth import (
+    UserRegister, TeammateInvite, AcceptInvitation, VerifyEmail, 
+    ForgotPassword, ResetPassword, InvitationResponse, TeammateResponse, 
+    TeammateUpdate, Token
+)
+from app.core.security import (
+    verify_password, get_password_hash, create_access_token, get_current_user
+)
 
 router = APIRouter()
-security = HTTPBearer()
-
-pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
-
-class UserRegister(BaseModel):
-    email: EmailStr
-    password: str
-    mill_name: str # The name of the mill
-    mill_tag: str  # The physical ID used in CSVs (e.g., MILL_01)
-
-class TeammateInvite(BaseModel):
-    email: EmailStr
-    role: UserRole
-
-class AcceptInvitation(BaseModel):
-    email: EmailStr
-    password: str
-    token: str
-
-class VerifyEmail(BaseModel):
-    email: EmailStr
-    token: str
-
-class ForgotPassword(BaseModel):
-    email: EmailStr
-
-class ResetPassword(BaseModel):
-    token: str
-    new_password: str
-
-class InvitationResponse(BaseModel):
-    id: int
-    email: EmailStr
-    role: UserRole
-    expires_at: datetime
-    is_accepted: bool
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-class TeammateResponse(BaseModel):
-    id: int
-    email: EmailStr
-    role: UserRole
-    is_verified: bool
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-class TeammateUpdate(BaseModel):
-    role: UserRole
-
-class Token(BaseModel):
-    access_token: str
-    token_type: str
-    api_key: Optional[str] = None
-
-def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
-
-def get_password_hash(password):
-    return pwd_context.hash(password)
-
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
-    return encoded_jwt
-
-async def get_current_user(auth: HTTPAuthorizationCredentials = Depends(security), db: AsyncSession = Depends(get_db)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    token = auth.credentials
-    try:
-        payload = jwt.decode(token, settings.secret_key, algorithms=[settings.algorithm])
-        email: str = payload.get("sub")
-        mill_id: int = payload.get("mill_id")
-        if email is None or mill_id is None:
-            raise credentials_exception
-    except JWTError:
-        raise credentials_exception
-    
-    result = await db.execute(select(User).where(User.email == email, User.mill_id == mill_id))
-    user = result.scalars().first()
-    if user is None:
-        raise credentials_exception
-    
-    # We allow unverified users to get their info via /me, 
-    # but other dependencies (like require_verified) will block them.
-    return user
 
 async def require_verified(current_user: User = Depends(get_current_user)):
     if not current_user.is_verified:
@@ -213,7 +118,7 @@ async def invite_teammate(invite: TeammateInvite, background_tasks: BackgroundTa
         select(Invitation).where(
             Invitation.email == invite.email,
             Invitation.mill_id == current_user.mill_id,
-            Invitation.is_accepted == False
+            Invitation.is_accepted.is_(False)
         )
     )
     existing_invite = invite_result.scalars().first()
@@ -260,7 +165,7 @@ async def list_invitations(current_user: User = Depends(require_manager), db: As
     result = await db.execute(
         select(Invitation).where(
             Invitation.mill_id == current_user.mill_id,
-            Invitation.is_accepted == False
+            Invitation.is_accepted.is_(False)
         ).order_by(Invitation.created_at.desc())
     )
     return result.scalars().all()
@@ -321,7 +226,7 @@ async def validate_invitation(token: str, email: str, db: AsyncSession = Depends
         select(Invitation).where(
             Invitation.email == email,
             Invitation.token == token,
-            Invitation.is_accepted == False,
+            Invitation.is_accepted.is_(False),
             Invitation.expires_at > datetime.utcnow()
         )
     )
@@ -344,7 +249,7 @@ async def accept_invitation(data: AcceptInvitation, db: AsyncSession = Depends(g
         select(Invitation).where(
             Invitation.email == data.email,
             Invitation.token == data.token,
-            Invitation.is_accepted == False,
+            Invitation.is_accepted.is_(False),
             Invitation.expires_at > datetime.utcnow()
         )
     )

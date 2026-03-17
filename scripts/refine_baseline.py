@@ -1,7 +1,7 @@
 import asyncio
 import pandas as pd
 from sqlalchemy import select, update, insert
-from app.core.database import get_db, AsyncSessionLocal
+from app.core.database import AsyncSessionLocal
 from app.models.mill_data import MachineDataPoint, MachineBaseline, MachineBaselineHistory
 from app.core.analysis import calculate_baseline_stats
 
