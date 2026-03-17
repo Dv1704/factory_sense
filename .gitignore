@@ -8,6 +8,7 @@ venv/
 
 # Data & Logs
 *.csv
+*.csv.gz
 data/
 *.log
 uvicorn_out.log

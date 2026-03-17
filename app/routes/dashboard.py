@@ -22,17 +22,6 @@ async def get_machine_specs(
     await get_api_key_mill(x_api_key, db)
     return {k: {"name": v["name"]} for k, v in MACHINE_SPECS.items()}
 
-@router.get("/billing")
-async def get_billing_info(
-    current_user: User = Depends(require_owner),
-    db: AsyncSession = Depends(get_db)
-):
-    return {
-        "status": "active",
-        "plan": "Enterprise Pro",
-        "next_billing_date": "2026-04-01",
-        "amount_due": "$499.00"
-    }
 
 @router.get("/summary")
 async def get_dashboard_summary(
