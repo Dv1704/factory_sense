@@ -30,6 +30,8 @@ from app.core.tasks import process_operational_data, process_baseline_data
 
 logger = logging.getLogger(__name__)
 
+from app.routes.auth import require_manager, require_owner
+
 # --- Models ---
 
 class BaselineUpdate(BaseModel):
@@ -86,6 +88,18 @@ async def get_api_key_mill(x_api_key: str = Header(...), db: AsyncSession = Depe
     mill = result.scalars().first()
     if not mill:
         raise HTTPException(status_code=401, detail="Invalid API Key")
+    
+    # Check if Owner is verified
+    from app.models.user import UserRole
+    owner_result = await db.execute(
+        select(User).where(User.mill_id == mill.id, User.role == UserRole.OWNER)
+    )
+    owner = owner_result.scalars().first()
+    if owner and not owner.is_verified:
+        raise HTTPException(
+            status_code=403, 
+            detail="Mill owner email verification required"
+        )
     return mill
 
 async def _process_baseline_request(background_tasks, file, mill, db, task_type):
@@ -95,8 +109,8 @@ async def _process_baseline_request(background_tasks, file, mill, db, task_type)
     # Create processing task
     task = ProcessingTask(
         task_id=task_id,
-        user_id=mill.user_id,
-        mill_id=mill.mill_id,
+        mill_id=mill.id,
+        mill_tag=mill.mill_tag,
         filename=file.filename,
         task_type=task_type,
         status=ProcessingStatus.PENDING
@@ -109,8 +123,8 @@ async def _process_baseline_request(background_tasks, file, mill, db, task_type)
         process_baseline_data,
         task_id,
         content,
-        mill.user_id,
-        mill.mill_id,
+        mill.id,
+        mill.mill_tag,
         AsyncSessionLocal
     )
     
@@ -132,7 +146,8 @@ async def upload_csv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="The CSV file containing operational sensor data"),
     mill: Mill = Depends(get_api_key_mill),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_manager)
 ):
     if not mill.has_uploaded_baseline:
         raise HTTPException(
@@ -144,14 +159,14 @@ async def upload_csv(
     content = await file.read()
     
     # Save raw file entry
-    raw_file = RawFile(user_id=mill.user_id, mill_id=mill.mill_id, filename=file.filename, status="PENDING")
+    raw_file = RawFile(mill_id=mill.id, mill_tag=mill.mill_tag, filename=file.filename, status="PENDING")
     db.add(raw_file)
     
     # Create processing task
     task = ProcessingTask(
         task_id=task_id,
-        user_id=mill.user_id,
-        mill_id=mill.mill_id,
+        mill_id=mill.id,
+        mill_tag=mill.mill_tag,
         filename=file.filename,
         task_type="OPERATIONAL_DATA",
         status=ProcessingStatus.PENDING
@@ -164,8 +179,8 @@ async def upload_csv(
         process_operational_data,
         task_id,
         content,
-        mill.user_id,
-        mill.mill_id,
+        mill.id,
+        mill.mill_tag,
         file.filename,
         AsyncSessionLocal
     )
@@ -219,7 +234,7 @@ async def get_task_status(
 ):
     stmt = select(ProcessingTask).where(
         ProcessingTask.task_id == task_id,
-        ProcessingTask.user_id == mill.user_id
+        ProcessingTask.mill_id == mill.id
     )
     result = await db.execute(stmt)
     task = result.scalars().first()
@@ -238,7 +253,7 @@ async def get_upload_history(
 ):
     result = await db.execute(
         select(RawFile)
-        .where(RawFile.user_id == mill.user_id)
+        .where(RawFile.mill_id == mill.id)
         .order_by(RawFile.upload_timestamp.desc())
     )
     history = result.scalars().all()
@@ -257,7 +272,7 @@ async def get_baselines(
     mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
 ):
-    result = await db.execute(select(MachineBaseline).where(MachineBaseline.user_id == mill.user_id))
+    result = await db.execute(select(MachineBaseline).where(MachineBaseline.mill_id == mill.id))
     baselines = result.scalars().all()
     return [
         {
@@ -276,7 +291,7 @@ async def get_baseline_history(
 ):
     result = await db.execute(
         select(MachineBaselineHistory)
-        .where(MachineBaselineHistory.user_id == mill.user_id)
+        .where(MachineBaselineHistory.mill_id == mill.id)
         .order_by(MachineBaselineHistory.timestamp.desc())
     )
     history = result.scalars().all()
@@ -301,7 +316,7 @@ async def get_machine_baseline_history(
     result = await db.execute(
         select(MachineBaselineHistory)
         .where(
-            MachineBaselineHistory.user_id == mill.user_id,
+            MachineBaselineHistory.mill_id == mill.id,
             MachineBaselineHistory.machine_id == machine_id
         )
         .order_by(MachineBaselineHistory.timestamp.desc())
@@ -327,7 +342,7 @@ async def manual_update_baseline(
 ):
     result = await db.execute(
         select(MachineBaseline).where(
-            MachineBaseline.user_id == mill.user_id,
+            MachineBaseline.mill_id == mill.id,
             MachineBaseline.machine_id == machine_id
         )
     )
@@ -350,7 +365,7 @@ async def delete_baseline(
 ):
     result = await db.execute(
         select(MachineBaseline).where(
-            MachineBaseline.user_id == mill.user_id,
+            MachineBaseline.mill_id == mill.id,
             MachineBaseline.machine_id == machine_id
         )
     )
@@ -375,7 +390,7 @@ async def get_summary(
 ):
     is_db_connected = await check_db_connection(db)
     
-    query = select(MachineDailyStats).where(MachineDailyStats.user_id == mill.user_id)
+    query = select(MachineDailyStats).where(MachineDailyStats.mill_id == mill.id)
     
     if start_date:
         query = query.where(MachineDailyStats.date >= start_date)

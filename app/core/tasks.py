@@ -53,8 +53,8 @@ async def update_task_progress(
 async def process_operational_data(
     task_id: str,
     file_content: bytes,
-    user_id: int,
-    mill_id: str,
+    mill_id: int,
+    mill_tag: str,
     filename: str,
     db_factory
 ):
@@ -120,17 +120,24 @@ async def process_operational_data(
             # Data point insertion
             data_points = chunk.to_dict('records')
             for dp in data_points:
-                dp['user_id'] = user_id
                 dp['mill_id'] = mill_id
+                dp['mill_tag'] = mill_tag
                 dp.pop('date', None) # Remove extra aggregation column
                 
             async with db_factory() as db:
-                await db.execute(insert(MachineDataPoint).values(data_points))
+                # Sub-batch insertion to avoid (sqlalchemy.dialects.postgresql.asyncpg.InterfaceError)
+                # "the number of query arguments cannot exceed 32767"
+                # With 9 columns, 1000 records = 9000 parameters, well within the limit.
+                sub_batch_size = 1000
+                for start_idx in range(0, len(data_points), sub_batch_size):
+                    end_idx = start_idx + sub_batch_size
+                    batch = data_points[start_idx:end_idx]
+                    await db.execute(insert(MachineDataPoint).values(batch))
                 
                 # Baseline fetch
                 baseline_res = await db.execute(
                     select(MachineBaseline).where(
-                        MachineBaseline.user_id == user_id,
+                        MachineBaseline.mill_id == mill_id,
                         MachineBaseline.machine_id.in_(machines)
                     )
                 )
@@ -157,7 +164,7 @@ async def process_operational_data(
                     
                     # Drift detection: Fetch last 7 days of average current
                     history_stmt = select(MachineDailyStats.avg_current_A).where(
-                        MachineDailyStats.user_id == user_id,
+                        MachineDailyStats.mill_id == mill_id,
                         MachineDailyStats.machine_id == m_id,
                         MachineDailyStats.date < curr_date
                     ).order_by(MachineDailyStats.date.desc()).limit(7)
@@ -178,7 +185,7 @@ async def process_operational_data(
                     
                     # Upsert stats
                     stats_stmt = select(MachineDailyStats).where(
-                        MachineDailyStats.user_id == user_id,
+                        MachineDailyStats.mill_id == mill_id,
                         MachineDailyStats.machine_id == m_id,
                         MachineDailyStats.date == curr_date
                     )
@@ -191,10 +198,18 @@ async def process_operational_data(
                         stats.run_hours += float(agg_row['run_hours'])
                         stats.excess_kwh += float(excess_kwh_sum)
                         stats.excess_co2_kg += float(excess_kwh_sum * EF)
-                        stats.health_score = (stats.health_score + health_score) / 2
+                        
+                        # Update reference metrics if they've been refined
+                        stats.reference_mean = baseline.mean_current
+                        stats.reference_std = baseline.std_current
+                        stats.reference_p95 = baseline.p95_current
+                        
+                        # Re-calculate health score using the updated baseline
+                        stats.health_score = health_score 
+                        stats.health_score_details = json.dumps(health_details)
                     else:
                         stats = MachineDailyStats(
-                            user_id=user_id, date=curr_date, mill_id=mill_id, machine_id=m_id,
+                            mill_id=mill_id, date=curr_date, mill_tag=mill_tag, machine_id=m_id,
                             total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh, 
                             excess_kwh=float(excess_kwh_sum), total_co2_kg=float(agg_row['total_co2']), 
                             excess_co2_kg=float(excess_kwh_sum * EF), bearing_risk=BearingRisk.NORMAL, 
@@ -214,14 +229,14 @@ async def process_operational_data(
                         
                         # Check if alert already exists for today to avoid spamming
                         alert_check = await db.execute(select(Alert).where(
-                            Alert.user_id == user_id,
+                            Alert.mill_id == mill_id,
                             Alert.machine_id == m_id,
                             Alert.timestamp >= datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
                         ))
                         if not alert_check.scalars().first():
                             db.add(Alert(
-                                user_id=user_id,
                                 mill_id=mill_id,
+                                mill_tag=mill_tag,
                                 machine_id=m_id,
                                 type=AlertType.WARNING,
                                 message=alert_msg
@@ -255,8 +270,8 @@ async def process_operational_data(
 async def process_baseline_data(
     task_id: str,
     file_content: bytes,
-    user_id: int,
-    mill_id: str,
+    mill_id: int,
+    mill_tag: str,
     db_factory
 ):
     try:
@@ -325,7 +340,7 @@ async def process_baseline_data(
                 p95_new = np.percentile(stats['samples'], 95) if stats['samples'] else mu_new
                 
                 stmt = select(MachineBaseline).where(
-                    MachineBaseline.user_id == user_id,
+                    MachineBaseline.mill_id == mill_id,
                     MachineBaseline.machine_id == m_id
                 )
                 result = await db.execute(stmt)
@@ -360,7 +375,7 @@ async def process_baseline_data(
                 else:
                     if not baseline:
                         baseline = MachineBaseline(
-                            user_id=user_id, mill_id=mill_id, machine_id=m_id,
+                            mill_id=mill_id, mill_tag=mill_tag, machine_id=m_id,
                             mean_current=float(mu_new), std_current=float(sigma_new), 
                             p95_current=float(p95_new), data_points_count=n_new
                         )
@@ -373,7 +388,7 @@ async def process_baseline_data(
                     update_type = "INITIAL_UPLOAD"
 
                 history = MachineBaselineHistory(
-                    user_id=user_id, mill_id=mill_id, machine_id=m_id,
+                    mill_id=mill_id, mill_tag=mill_tag, machine_id=m_id,
                     mean_current=baseline.mean_current, std_current=baseline.std_current,
                     p95_current=baseline.p95_current, data_points_count=n_new,
                     update_type=update_type
@@ -387,7 +402,7 @@ async def process_baseline_data(
                     message=f"Merging baseline for {m_id}..."
                 )
 
-            mill_stmt = update(Mill).where(Mill.user_id == user_id).values(has_uploaded_baseline=True)
+            mill_stmt = update(Mill).where(Mill.id == mill_id).values(has_uploaded_baseline=True)
             await db.execute(mill_stmt)
             await db.commit()
 

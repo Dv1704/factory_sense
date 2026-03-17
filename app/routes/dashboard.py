@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.models.user import User, Mill
 from app.models.mill_data import MachineDailyStats, Alert, MachineDataPoint, BearingRisk
 from app.routes.data import get_api_key_mill, MACHINE_SPECS
+from app.routes.auth import require_owner, require_manager
 
 router = APIRouter()
 
@@ -19,9 +20,24 @@ async def get_machine_specs(
     db: AsyncSession = Depends(get_db)
 ):
     """Returns the safety thresholds and metadata for all machines."""
+    await get_api_key_mill(x_api_key, db) # Validate API key and owner verification
+    
     # Remove max_a from specs before returning
     clean_specs = {k: {"name": v["name"]} for k, v in MACHINE_SPECS.items()}
     return clean_specs
+
+@router.get("/billing")
+async def get_billing_info(
+    current_user: User = Depends(require_owner),
+    db: AsyncSession = Depends(get_db)
+):
+    """Owner-only endpoint for billing information."""
+    return {
+        "status": "active",
+        "plan": "Enterprise Pro",
+        "next_billing_date": "2026-04-01",
+        "amount_due": "$499.00"
+    }
 
 @router.get("/summary")
 async def get_dashboard_summary(
@@ -33,7 +49,7 @@ async def get_dashboard_summary(
     
     if not date:
         # Get latest date available for this mill
-        latest_date_query = select(func.max(MachineDailyStats.date)).where(MachineDailyStats.user_id == mill.user_id)
+        latest_date_query = select(func.max(MachineDailyStats.date)).where(MachineDailyStats.mill_id == mill.id)
         result = await db.execute(latest_date_query)
         date = result.scalar()
     
@@ -47,7 +63,7 @@ async def get_dashboard_summary(
 
     # Query stats for the given date
     stats_query = select(MachineDailyStats).where(
-        MachineDailyStats.user_id == mill.user_id,
+        MachineDailyStats.mill_id == mill.id,
         MachineDailyStats.date == date
     )
     result = await db.execute(stats_query)
@@ -55,7 +71,7 @@ async def get_dashboard_summary(
 
     # Query active alerts
     alerts_query = select(func.count(Alert.id)).where(
-        Alert.user_id == mill.user_id,
+        Alert.mill_id == mill.id,
         Alert.is_acknowledged == False
     )
     result = await db.execute(alerts_query)
@@ -85,7 +101,7 @@ async def get_machines(
             MachineDailyStats.machine_id,
             func.max(MachineDailyStats.date).label("max_date")
         )
-        .where(MachineDailyStats.user_id == mill.user_id)
+        .where(MachineDailyStats.mill_id == mill.id)
         .group_by(MachineDailyStats.machine_id)
         .subquery()
     )
@@ -93,7 +109,7 @@ async def get_machines(
     query = (
         select(MachineDailyStats)
         .join(subquery, (MachineDailyStats.machine_id == subquery.c.machine_id) & (MachineDailyStats.date == subquery.c.max_date))
-        .where(MachineDailyStats.user_id == mill.user_id)
+        .where(MachineDailyStats.mill_id == mill.id)
     )
     
     result = await db.execute(query)
@@ -154,7 +170,7 @@ async def get_machine_trends(
     query = (
         select(MachineDailyStats)
         .where(
-            MachineDailyStats.user_id == mill.user_id,
+            MachineDailyStats.mill_id == mill.id,
             MachineDailyStats.machine_id == machine_id,
             MachineDailyStats.date >= start_date
         )

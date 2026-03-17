@@ -21,8 +21,9 @@ class UserUpdate(BaseModel):
     password: str
 
 class MillCreate(BaseModel):
+    mill_tag: str
+    mill_name: str
     user_id: int
-    mill_id: str
 
 class StatsUpdate(BaseModel):
     health_score: float
@@ -73,8 +74,7 @@ async def list_mills(admin: User = Depends(get_current_admin_user), db: AsyncSes
     return [
         {
             "id": m.id, 
-            "user_id": m.user_id, 
-            "mill_id": m.mill_id, 
+            "mill_tag": m.mill_tag, 
             "api_key": m.api_key, 
             "has_baseline": m.has_uploaded_baseline,
             "created_at": m.created_at
@@ -83,19 +83,26 @@ async def list_mills(admin: User = Depends(get_current_admin_user), db: AsyncSes
 
 @router.post("/mills")
 async def create_mill(mill: MillCreate, admin: User = Depends(get_current_admin_user), db: AsyncSession = Depends(get_db)):
-    """Add a new mill for an existing user."""
+    """Add a new mill and assign it to an existing user."""
     # check user
     result = await db.execute(select(User).where(User.id == mill.user_id))
-    if not result.scalars().first():
+    user = result.scalars().first()
+    if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    api_key = f"fsa_{mill.mill_id}_{secrets.token_hex(16)}"
+    api_key = f"fsa_{mill.mill_tag}_{secrets.token_hex(16)}"
     new_mill = Mill(
-        user_id=mill.user_id,
-        mill_id=mill.mill_id,
+        name=mill.mill_name,
+        mill_tag=mill.mill_tag,
         api_key=api_key
     )
     db.add(new_mill)
+    await db.flush()
+    
+    # Associate user with the new mill and promote to OWNER if appropriate
+    user.mill_id = new_mill.id
+    user.role = UserRole.OWNER # Default to Owner when creating a mill for them
+    
     await db.commit()
     await db.refresh(new_mill)
     return {"status": "success", "mill_id": new_mill.id, "api_key": api_key}
@@ -108,6 +115,7 @@ async def global_upload_history(admin: User = Depends(get_current_admin_user), d
     return [
         {
             "mill_id": h.mill_id,
+            "mill_tag": h.mill_tag,
             "filename": h.filename,
             "timestamp": h.upload_timestamp,
             "status": h.status

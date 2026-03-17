@@ -3,6 +3,11 @@ power_factor: 0.85
 efficiency: 0.90
 grid_emission_factor: 0.233
 raw_data_retention_days: 3650
-secret_key: "CHANGE_ME_IN_PRODUCTION"
+secret_key: "deevictor"
 algorithm: "HS256"
 access_token_expire_minutes: 30
+
+# SMTP Settings
+smtp_server: "localhost"
+smtp_port: 1025
+smtp_from: "noreply@factorysense.ai"

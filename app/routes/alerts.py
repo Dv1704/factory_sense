@@ -18,9 +18,11 @@ async def get_alerts(
 ):
     mill = await get_api_key_mill(x_api_key, db)
     
+    print(f"DEBUG: Alert attributes: {dir(Alert)}")
+    print(f"DEBUG: mill object: {mill}")
     result = await db.execute(
         select(Alert)
-        .where(Alert.user_id == mill.user_id, Alert.is_acknowledged == False)
+        .where(Alert.mill_id == mill.id, Alert.is_acknowledged == False)
         .order_by(Alert.timestamp.desc())
     )
     alerts = result.scalars().all()
@@ -35,7 +37,7 @@ async def get_alerts(
         } for a in alerts
     ]
 
-@router.patch("/{alert_id}/acknowledge")
+@router.post("/{alert_id}/acknowledge")
 async def acknowledge_alert(
     alert_id: int,
     x_api_key: str = Header(...),
@@ -45,7 +47,7 @@ async def acknowledge_alert(
     
     # Check if alert exists and belongs to this mill
     result = await db.execute(
-        select(Alert).where(Alert.id == alert_id, Alert.user_id == mill.user_id)
+        select(Alert).where(Alert.id == alert_id, Alert.mill_id == mill.id)
     )
     alert = result.scalars().first()
     

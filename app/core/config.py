@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     sentry_dsn: Optional[str] = None
+    
+    # SMTP Settings
+    smtp_server: str = "localhost"
+    smtp_port: int = 1025
+    smtp_user: Optional[str] = None
+    smtp_password: Optional[str] = None
+    smtp_from: str = "noreply@factorysense.ai"
 
     class Config:
         env_file = ".env"
