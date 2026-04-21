@@ -28,3 +28,6 @@ repro_*.py
 generate_*.py
 create_tables.py
 final_analysis_report.py
+*.db
+test_venv/
+__pycache__/
