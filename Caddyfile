@@ -1,3 +1,0 @@
-144-91-111-151.nip.io {
-    reverse_proxy web:8000
-}
