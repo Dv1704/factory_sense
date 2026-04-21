@@ -1,6 +1,5 @@
 #!/bin/bash
-# Contabo Deployment Script
-# This version is optimized for direct local-to-VPS deployment
+# Contabo Deployment Script - HTTPS Enabled
 
 set -e
 
@@ -12,39 +11,38 @@ echo ""
 # Navigate to project directory
 cd /root/FactorySenseAI || exit 1
 
-# [1] REMOVED GITHUB PULL 
-# We skip this because you are pushing code directly from your laptop.
-echo "[1] Code already pushed from local machine. Skipping GitHub pull..."
+echo "[1] Code already pushed. Syncing state..."
+# Ensures the server files perfectly match your last push
+git reset --hard
 
 echo ""
 echo "[2] Checking Docker status..."
-# Using 'docker compose' (v2) instead of the older 'docker-compose'
 docker compose -f docker-compose.prod.yml ps
 echo ""
 
-echo "[3] Restarting containers..."
-# Use 'up -d' to ensure everything is running and updated
-docker compose -f docker-compose.prod.yml up -d --build web
-echo "✓ Service restarted"
+echo "[3] Restarting all services (including HTTPS Proxy)..."
+# We remove 'web' so that Caddy and the DB also restart/start
+docker compose -f docker-compose.prod.yml up -d --build
+echo "✓ Services restarted"
 
 echo ""
-echo "[4] Waiting for service to be ready..."
-sleep 5
+echo "[4] Waiting for SSL handshake (nip.io)..."
+sleep 10
 
 echo ""
-echo "[5] Testing health endpoint..."
-# Added a check to see if the container is actually listening on 8000
-curl -s http://localhost:8000/ && echo "" && echo "✓ API is running" || echo "⚠ API not responding yet"
+echo "[5] Testing HTTPS health endpoint..."
+# Testing the actual HTTPS URL from your Caddyfile
+curl -s -k https://144-91-111-151.nip.io/ && echo "✓ HTTPS API is LIVE" || echo "⚠ HTTPS not responding yet"
 
 echo ""
-echo "[6] Showing recent logs..."
-docker compose -f docker-compose.prod.yml logs web | tail -20
+echo "[6] Showing Caddy logs (SSL Status)..."
+docker compose -f docker-compose.prod.yml logs caddy | tail -10
 
 echo ""
 echo "=========================================="
 echo "Deployment Complete!"
 echo "=========================================="
 echo ""
-echo "API Endpoint: http://144.91.111.151:8000"
-echo "Docs: http://144.91.111.151:8000/docs"
+echo "HTTPS Endpoint: https://144-91-111-151.nip.io"
+echo "Docs: https://144-91-111-151.nip.io/docs"
 echo ""
