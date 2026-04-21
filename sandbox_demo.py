@@ -2,7 +2,8 @@ import requests
 import time
 import sys
 
-BASE_URL = "http://localhost:8000/api/v1"
+import os
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000/api/v1")
 
 def print_step(msg):
     print(f"\n[{time.strftime('%H:%M:%S')}] {msg}")
@@ -13,7 +14,7 @@ def run_demo():
 
     # 1. Register User (Admin)
     print_step("Registering Admin User...")
-    resp = requests.post(f"{BASE_URL}/auth/register", data={"username": "demo@factory.com", "password": "demo_password", "role": "ADMIN"})
+    resp = requests.post(f"{BASE_URL}/auth/register", json={"email": "demo@factory.com", "password": "demo_password", "mill_id": "DEMO_MILL_1", "role": "admin"})
     if resp.status_code == 200:
         print("Success!")
     else:

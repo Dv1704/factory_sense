@@ -92,6 +92,10 @@ async def _process_baseline_request(background_tasks, file, mill, db, task_type)
     task_id = str(uuid.uuid4())
     content = await file.read()
     
+    # Save raw file entry
+    raw_file = RawFile(user_id=mill.user_id, mill_id=mill.mill_id, filename=file.filename, status="PENDING")
+    db.add(raw_file)
+
     # Create processing task
     task = ProcessingTask(
         task_id=task_id,
@@ -111,6 +115,7 @@ async def _process_baseline_request(background_tasks, file, mill, db, task_type)
         content,
         mill.user_id,
         mill.mill_id,
+        file.filename,
         AsyncSessionLocal
     )
     

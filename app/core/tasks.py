@@ -14,7 +14,8 @@ from sqlalchemy import insert, update, text
 
 from app.models.mill_data import (
     MachineDataPoint, MachineDailyStats, Alert, AlertType, 
-    MachineBaseline, MachineBaselineHistory, ProcessingTask, ProcessingStatus, BearingRisk
+    MachineBaseline, MachineBaselineHistory, ProcessingTask, ProcessingStatus, BearingRisk,
+    RawFile
 )
 from app.models.user import Mill
 from app.core import physics, analysis
@@ -48,6 +49,26 @@ async def update_task_progress(
             stmt = stmt.values(completed_at=datetime.utcnow(), estimated_seconds_remaining=0)
         
         await db.execute(stmt)
+        
+        # Sync with RawFile table if we have enough info
+        # We find the most recent RawFile for this user/mill/filename
+        # This ensures the "Upload History" dashboard stays in sync.
+        task_res = await db.execute(select(ProcessingTask).where(ProcessingTask.task_id == task_id))
+        task = task_res.scalars().first()
+        if task:
+            # We target the most recent RawFile entry for this specific upload to avoid 
+            # updating older history entries with the same filename.
+            subquery = select(RawFile.id).where(
+                RawFile.user_id == task.user_id,
+                RawFile.mill_id == task.mill_id,
+                RawFile.filename == task.filename
+            ).order_by(RawFile.upload_timestamp.desc()).limit(1).scalar_subquery()
+            
+            raw_file_stmt = update(RawFile).where(RawFile.id == subquery).values(
+                status=status.value if isinstance(status, ProcessingStatus) else status
+            )
+            await db.execute(raw_file_stmt)
+
         await db.commit()
 
 async def process_operational_data(
@@ -61,13 +82,15 @@ async def process_operational_data(
     try:
         await update_task_progress(db_factory, task_id, 0.1, message="Started processing...")
         
-        # Read total rows for progress calculation
+        # Efficiently count rows for progress tracking without loading everything into a DataFrame
         try:
-            full_df = pd.read_csv(io.BytesIO(file_content))
-            total_rows = len(full_df)
+            # We use a memory-efficient way to count lines
+            file_stream = io.BytesIO(file_content)
+            total_rows = sum(1 for _ in file_stream) - 1 # Subtract header
+            if total_rows < 0: total_rows = 0
         except Exception as e:
-            await update_task_progress(db_factory, task_id, 0, status=ProcessingStatus.FAILED, message=f"CSV Read Error: {str(e)}")
-            return
+            logger.warning(f"Could not count rows efficiently: {e}")
+            total_rows = 0 # Fallback
 
         if total_rows == 0:
             await update_task_progress(db_factory, task_id, 1.0, status=ProcessingStatus.COMPLETED, message="Empty file.")
@@ -257,6 +280,7 @@ async def process_baseline_data(
     file_content: bytes,
     user_id: int,
     mill_id: str,
+    filename: str,
     db_factory
 ):
     try:
