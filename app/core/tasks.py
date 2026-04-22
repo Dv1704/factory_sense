@@ -140,7 +140,7 @@ async def process_operational_data(
             machines = chunk['machine_id'].unique().tolist()
             all_machines_in_file.update(machines)
             
-            # Data point insertion
+            # Data point insertion (Batched to avoid Postgres parameter limits)
             data_points = chunk.to_dict('records')
             for dp in data_points:
                 dp['user_id'] = user_id
@@ -148,7 +148,12 @@ async def process_operational_data(
                 dp.pop('date', None) # Remove extra aggregation column
                 
             async with db_factory() as db:
-                await db.execute(insert(MachineDataPoint).values(data_points))
+                # Secondary batching for DB insertion: max 32767 parameters. 
+                # With ~10 columns, 2000 rows is a safe limit (20,000 params).
+                db_batch_size = 2000
+                for j in range(0, len(data_points), db_batch_size):
+                    batch = data_points[j:j + db_batch_size]
+                    await db.execute(insert(MachineDataPoint).values(batch))
                 
                 # Baseline fetch
                 baseline_res = await db.execute(
