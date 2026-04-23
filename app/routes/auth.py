@@ -22,7 +22,7 @@ class UserRegister(BaseModel):
     email: EmailStr
     password: str
     mill_id: str
-    role: Optional[UserRole] = UserRole.MANAGER
+    role: Optional[UserRole] = UserRole.manager
 
 class Token(BaseModel):
     access_token: str
@@ -65,7 +65,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
     return user
 
 async def get_current_admin_user(current_user: User = Depends(get_current_user)):
-    if current_user.role != UserRole.ADMIN:
+    if current_user.role != UserRole.admin:
         raise HTTPException(status_code=403, detail="Not enough permissions")
     return current_user
 
