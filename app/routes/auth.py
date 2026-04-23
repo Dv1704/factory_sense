@@ -28,6 +28,7 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     api_key: Optional[str] = None
+    mill_id: Optional[str] = None
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -123,7 +124,12 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSessi
     access_token = create_access_token(
         data={"sub": db_user.email, "mill_id": mill_id}, expires_delta=access_token_expires
     )
-    return {"access_token": access_token, "token_type": "bearer", "api_key": api_key}
+    return {
+        "access_token": access_token, 
+        "token_type": "bearer", 
+        "api_key": api_key,
+        "mill_id": mill_id
+    }
 
 @router.post("/logout")
 async def logout():
@@ -135,9 +141,21 @@ async def logout():
     return {"status": "success", "message": "Successfully logged out"}
 
 @router.get("/me")
-async def read_users_me(current_user: User = Depends(get_current_user)):
+async def read_users_me(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # Fetch mills for this user
+    result = await db.execute(select(Mill).where(Mill.user_id == current_user.id))
+    mills = result.scalars().all()
+    
     return {
         "id": current_user.id,
         "email": current_user.email,
-        "role": current_user.role.value
+        "role": current_user.role.value,
+        "created_at": current_user.created_at,
+        "mills": [
+            {
+                "mill_id": m.mill_id,
+                "api_key": m.api_key,
+                "has_baseline": m.has_uploaded_baseline
+            } for m in mills
+        ]
     }
