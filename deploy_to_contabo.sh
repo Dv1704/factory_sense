@@ -35,12 +35,17 @@ echo "[5] Testing HTTPS health endpoint..."
 curl -s -k https://144-91-111-151.nip.io/ && echo "✓ HTTPS API is LIVE" || echo "⚠ HTTPS not responding yet"
 
 echo ""
-echo "[6] Running database migrations (Role Normalization)..."
+echo "[6] Preparing database enum values..."
+docker compose -f docker-compose.prod.yml exec -T db psql -U factory_user -d factorysense -c "ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'admin';"
+docker compose -f docker-compose.prod.yml exec -T db psql -U factory_user -d factorysense -c "ALTER TYPE userrole ADD VALUE IF NOT EXISTS 'manager';"
+
+echo ""
+echo "[7] Running database migrations (Role Normalization)..."
 docker compose -f docker-compose.prod.yml exec -T web python3 scripts/normalize_roles.py
 echo "✓ Migrations complete"
 
 echo ""
-echo "[7] Showing Caddy logs (SSL Status)..."
+echo "[8] Showing Caddy logs (SSL Status)..."
 docker compose -f docker-compose.prod.yml logs caddy | tail -10
 
 echo ""
