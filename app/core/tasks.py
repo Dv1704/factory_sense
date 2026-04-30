@@ -130,9 +130,24 @@ async def process_operational_data(
                 processed_rows += chunk_size # Move on
                 continue
 
+            # Sort to calculate accurate durations
+            chunk = chunk.sort_values(by=['machine_id', 'timestamp'])
+            
+            # Calculate duration in hours between readings
+            chunk['duration_hours'] = chunk.groupby('machine_id')['timestamp'].diff().dt.total_seconds() / 3600.0
+            
+            # Default first reading of each chunk to the median duration, or 1 minute fallback
+            median_duration = chunk['duration_hours'].median()
+            if pd.isna(median_duration):
+                median_duration = 1.0 / 60.0
+            chunk['duration_hours'] = chunk['duration_hours'].fillna(median_duration)
+            
+            # Duration for running time only
+            chunk['running_duration_hours'] = np.where(chunk['motor_state'] == 'RUNNING', chunk['duration_hours'], 0.0)
+
             # Calculations
             chunk['power_kw'] = (SQRT3 * V * chunk['current_A'] * PF * EFF) / 1000
-            chunk['energy_kwh'] = chunk['power_kw'] / 60
+            chunk['energy_kwh'] = chunk['power_kw'] * chunk['duration_hours']
             chunk['co2_kg'] = chunk['energy_kwh'] * EF
             chunk['date'] = chunk['timestamp'].dt.date
             
@@ -146,6 +161,8 @@ async def process_operational_data(
                 dp['user_id'] = user_id
                 dp['mill_id'] = mill_id
                 dp.pop('date', None) # Remove extra aggregation column
+                dp.pop('duration_hours', None)
+                dp.pop('running_duration_hours', None)
                 
             async with db_factory() as db:
                 # Secondary batching for DB insertion: max 32767 parameters. 
@@ -171,9 +188,8 @@ async def process_operational_data(
                     avg_current=('current_A', 'mean'),
                     max_current=('current_A', 'max'),
                     std_current=('current_A', 'std'),
-                    run_count=('motor_state', lambda x: (x == 'RUNNING').sum())
+                    run_hours=('running_duration_hours', 'sum')
                 ).reset_index()
-                agg_df['run_hours'] = agg_df['run_count'] / 60.0
                 
                 for _, agg_row in agg_df.iterrows():
                     curr_date = agg_row['date']

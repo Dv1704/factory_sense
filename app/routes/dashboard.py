@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import date, datetime, timedelta
 import json
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.models.user import User, Mill
@@ -12,6 +13,39 @@ from app.models.mill_data import MachineDailyStats, Alert, MachineDataPoint, Bea
 from app.routes.data import get_api_key_mill, MACHINE_SPECS
 
 router = APIRouter()
+
+class ReferenceMetrics(BaseModel):
+    baseline_mean: float
+    baseline_std: float
+    baseline_p95: float
+
+class MachineSummaryResponse(BaseModel):
+    machine_id: str
+    energy_consumption: float
+    carbon_emissions: float
+    avg_current: float
+    run_hours: float
+    reference_metrics: ReferenceMetrics
+    health_score: float
+    health_score_breakdown: Dict[str, Any]
+    status: str
+
+class MachineTrendResponse(BaseModel):
+    date: date
+    energy_kwh: float
+    carbon_kg: float
+    avg_current: float
+    run_hours: float
+    health_score: float
+    rolling_7d_current: Optional[float]
+    rolling_30d_current: Optional[float]
+
+class DashboardSummaryResponse(BaseModel):
+    total_energy_kwh: float
+    total_co2_kg: float
+    machine_count: int
+    active_alerts_count: int
+    date: Optional[date]
 
 @router.get("/machine-specs")
 async def get_machine_specs(
@@ -23,7 +57,7 @@ async def get_machine_specs(
     clean_specs = {k: {"name": v["name"]} for k, v in MACHINE_SPECS.items()}
     return clean_specs
 
-@router.get("/summary")
+@router.get("/summary", response_model=DashboardSummaryResponse)
 async def get_dashboard_summary(
     date: Optional[date] = None,
     x_api_key: str = Header(...),
@@ -72,7 +106,7 @@ async def get_dashboard_summary(
         "date": date
     }
 
-@router.get("/machines")
+@router.get("/machines", response_model=List[MachineSummaryResponse])
 async def get_machines(
     x_api_key: str = Header(...),
     db: AsyncSession = Depends(get_db)
@@ -120,6 +154,7 @@ async def get_machines(
             "energy_consumption": round(s.total_energy_kwh, 2),
             "carbon_emissions": round(s.total_co2_kg, 2),
             "avg_current": round(s.avg_current_A, 2) if s.avg_current_A else 0,
+            "run_hours": round(s.run_hours, 2),
             "reference_metrics": {
                 "baseline_mean": round(s.reference_mean, 2) if s.reference_mean else 0.0,
                 "baseline_std": round(s.reference_std, 2) if s.reference_std else 0.0,
@@ -132,7 +167,7 @@ async def get_machines(
     
     return machines
 
-@router.get("/machines/{machine_id}/trends")
+@router.get("/machines/{machine_id}/trends", response_model=List[MachineTrendResponse])
 async def get_machine_trends(
     machine_id: str,
     range: str = "7d",
@@ -173,6 +208,7 @@ async def get_machine_trends(
         "energy_kwh": t.total_energy_kwh,
         "carbon_kg": t.total_co2_kg,
         "avg_current": t.avg_current_A or 0.0,
+        "run_hours": t.run_hours,
         "health_score": t.health_score or 0.0
     } for t in trends])
     
@@ -194,6 +230,7 @@ async def get_machine_trends(
             "energy_kwh": round(row['energy_kwh'], 2),
             "carbon_kg": round(row['carbon_kg'], 2),
             "avg_current": round(row['avg_current'], 2),
+            "run_hours": round(row['run_hours'], 2),
             "health_score": round(row['health_score'], 1),
             "rolling_7d_current": round(row['rolling_7d_current'], 2) if pd.notnull(row['rolling_7d_current']) else None,
             "rolling_30d_current": round(row['rolling_30d_current'], 2) if pd.notnull(row['rolling_30d_current']) else None
