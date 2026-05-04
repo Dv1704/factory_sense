@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Header, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from sqlalchemy import insert
+from sqlalchemy import insert, delete
 from typing import List, Optional
 import pandas as pd
 import io
@@ -366,6 +366,54 @@ async def delete_baseline(
     await db.delete(baseline)
     await db.commit()
     return {"status": "success", "message": f"Baseline for {machine_id} deleted"}
+
+@router.delete("/baseline", summary="Delete All Mill Baseline Data")
+async def delete_all_baseline(
+    mill: Mill = Depends(get_api_key_mill),
+    db: AsyncSession = Depends(get_db)
+):
+    """Deletes all baseline data and baseline history for the mill."""
+    # Delete from MachineBaseline
+    await db.execute(delete(MachineBaseline).where(
+        MachineBaseline.user_id == mill.user_id, 
+        MachineBaseline.mill_id == mill.mill_id
+    ))
+    # Delete from MachineBaselineHistory
+    await db.execute(delete(MachineBaselineHistory).where(
+        MachineBaselineHistory.user_id == mill.user_id, 
+        MachineBaselineHistory.mill_id == mill.mill_id
+    ))
+    
+    # Reset mill status
+    mill.has_uploaded_baseline = False
+    
+    await db.commit()
+    return {"status": "success", "message": "All baseline data for the mill has been deleted"}
+
+@router.delete("/operational", summary="Delete All Mill Operational Data")
+async def delete_all_operational(
+    mill: Mill = Depends(get_api_key_mill),
+    db: AsyncSession = Depends(get_db)
+):
+    """Deletes all machine data points, daily statistics, and alerts for the mill."""
+    # Delete from MachineDataPoint
+    await db.execute(delete(MachineDataPoint).where(
+        MachineDataPoint.user_id == mill.user_id, 
+        MachineDataPoint.mill_id == mill.mill_id
+    ))
+    # Delete from MachineDailyStats
+    await db.execute(delete(MachineDailyStats).where(
+        MachineDailyStats.user_id == mill.user_id, 
+        MachineDailyStats.mill_id == mill.mill_id
+    ))
+    # Delete from Alert
+    await db.execute(delete(Alert).where(
+        Alert.user_id == mill.user_id, 
+        Alert.mill_id == mill.mill_id
+    ))
+    
+    await db.commit()
+    return {"status": "success", "message": "All operational data for the mill has been deleted"}
 
 # --- Analytics Summary ---
 
