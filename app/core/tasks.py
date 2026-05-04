@@ -136,11 +136,10 @@ async def process_operational_data(
             # Calculate duration in hours between readings
             chunk['duration_hours'] = chunk.groupby('machine_id')['timestamp'].diff().dt.total_seconds() / 3600.0
             
-            # Default first reading of each chunk to the median duration, or 1 minute fallback
-            median_duration = chunk['duration_hours'].median()
-            if pd.isna(median_duration):
-                median_duration = 1.0 / 60.0
-            chunk['duration_hours'] = chunk['duration_hours'].fillna(median_duration)
+            # Default first reading of each machine to its own median duration, or 1 minute fallback
+            machine_medians = chunk.groupby('machine_id')['duration_hours'].transform('median')
+            chunk['duration_hours'] = chunk['duration_hours'].fillna(machine_medians)
+            chunk['duration_hours'] = chunk['duration_hours'].fillna(1.0 / 60.0)
             
             # Duration for running time only
             chunk['running_duration_hours'] = np.where(chunk['motor_state'] == 'RUNNING', chunk['duration_hours'], 0.0)
