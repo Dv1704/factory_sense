@@ -16,6 +16,11 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     sentry_dsn: Optional[str] = None
 
+    # If set, a superadmin account is created on startup (only once).
+    # Set these in .env or environment variables — never in config.yaml.
+    superadmin_email: Optional[str] = None
+    superadmin_password: Optional[str] = None
+
     class Config:
         env_file = ".env"
 

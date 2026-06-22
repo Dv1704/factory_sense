@@ -13,196 +13,314 @@ import secrets
 
 router = APIRouter()
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+
+def _is_superadmin(user: User) -> bool:
+    return user.role == UserRole.superadmin
+
+
+async def _assert_owns_user(target_user: User, admin: User) -> None:
+    """Mill admin may only act on users they created."""
+    if not _is_superadmin(admin) and target_user.created_by_id != admin.id:
+        raise HTTPException(status_code=403, detail="Access denied to this user")
+
+
+async def _assert_owns_mill(mill: Mill, admin: User) -> None:
+    """Mill admin may only act on mills they administer."""
+    if not _is_superadmin(admin) and mill.admin_id != admin.id:
+        raise HTTPException(status_code=403, detail="Access denied to this mill")
+
+
+# ── schemas ───────────────────────────────────────────────────────────────────
+
 class UserCreate(BaseModel):
     email: EmailStr
     password: str
-    role: UserRole
+    role: UserRole = UserRole.manager   # mill admins create managers by default
+
 
 class UserUpdate(BaseModel):
     password: str
 
+
 class MillCreate(BaseModel):
+    mill_id: str
+    # For superadmin: optionally assign to a different user. For mill admin: always self.
     user_id: Optional[int] = None
     email: Optional[EmailStr] = None
-    mill_id: str
+
 
 class StatsUpdate(BaseModel):
     health_score: float
     bearing_risk: str
-    message: str # Why it was corrected
+    message: str
+
+
+# ── users ─────────────────────────────────────────────────────────────────────
 
 @router.get("/users")
 async def list_users(
     email: Optional[str] = None,
     role: Optional[UserRole] = None,
-    admin: User = Depends(get_current_admin_user), 
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """List all users in the platform."""
+    """
+    Superadmin: all users.
+    Mill admin: only users they created (their managers).
+    """
     query = select(User)
+
+    if not _is_superadmin(admin):
+        query = query.where(User.created_by_id == admin.id)
+
     if email:
         query = query.where(User.email.contains(email))
     if role:
         query = query.where(User.role == role)
-        
+
     result = await db.execute(query)
     users = result.scalars().all()
-    
-    # Enrich with mill count
-    enriched_users = []
+
+    enriched = []
     for u in users:
-        # This is a bit inefficient (N+1), but fine for admin panel with small number of users
-        # Better: use a join with count
-        mill_count_res = await db.execute(select(func.count(Mill.id)).where(Mill.user_id == u.id))
-        mill_count = mill_count_res.scalar()
-        
-        enriched_users.append({
-            "id": u.id, 
-            "email": u.email, 
-            "role": u.role.value, 
+        mill_count = (
+            await db.execute(select(func.count(Mill.id)).where(Mill.user_id == u.id))
+        ).scalar() or 0
+        enriched.append({
+            "id": u.id,
+            "email": u.email,
+            "role": u.role.value,
             "mill_count": mill_count,
-            "created_at": u.created_at
+            "created_at": u.created_at,
         })
-    return enriched_users
+    return enriched
+
 
 @router.post("/users")
-async def create_user(user: UserCreate, admin: User = Depends(get_current_admin_user), db: AsyncSession = Depends(get_db)):
-    """Admin endpoint to create a new user directly."""
-    result = await db.execute(select(User).where(User.email == user.email))
-    if result.scalars().first():
+async def create_user(
+    user: UserCreate,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a new user.
+    Mill admin can only create manager-role users.
+    Superadmin can create any role except superadmin (use env seed for that).
+    """
+    if not _is_superadmin(admin):
+        if user.role != UserRole.manager:
+            raise HTTPException(
+                status_code=403,
+                detail="Mill admins can only create manager accounts",
+            )
+
+    if user.role == UserRole.superadmin:
+        raise HTTPException(
+            status_code=403,
+            detail="Superadmin accounts cannot be created via API",
+        )
+
+    existing = await db.execute(select(User).where(User.email == user.email))
+    if existing.scalars().first():
         raise HTTPException(status_code=400, detail="Email already exists")
-    
+
     new_user = User(
         email=user.email,
         password_hash=get_password_hash(user.password),
-        role=user.role
+        role=user.role,
+        created_by_id=admin.id,
     )
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
     return {"status": "success", "user_id": new_user.id}
 
+
 @router.put("/users/{user_id}/reset-password")
-async def reset_password(user_id: int, user_update: UserUpdate, admin: User = Depends(get_current_admin_user), db: AsyncSession = Depends(get_db)):
-    """Force reset a user's password."""
+async def reset_password(
+    user_id: int,
+    user_update: UserUpdate,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(User).where(User.id == user_id))
     user = result.scalars().first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
+    await _assert_owns_user(user, admin)
+
     user.password_hash = get_password_hash(user_update.password)
     await db.commit()
-    return {"status": "success", "message": f"Password reset for user {user.email}"}
+    return {"status": "success", "message": f"Password reset for {user.email}"}
+
+
+# ── mills ─────────────────────────────────────────────────────────────────────
 
 @router.get("/mills")
 async def list_mills(
     mill_id: Optional[str] = None,
     user_id: Optional[int] = None,
-    admin: User = Depends(get_current_admin_user), 
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """List all registered mills."""
-    # Join with User to get owner email
+    """
+    Superadmin: all mills across all customers.
+    Mill admin: only mills they own (admin_id == current user).
+    """
     query = select(Mill, User).join(User, Mill.user_id == User.id)
+
+    if not _is_superadmin(admin):
+        query = query.where(Mill.admin_id == admin.id)
+
     if mill_id:
         query = query.where(Mill.mill_id.contains(mill_id))
     if user_id:
         query = query.where(Mill.user_id == user_id)
-        
+
     result = await db.execute(query)
-    mills_with_users = result.all()
-    
     return [
         {
-            "id": m.id, 
-            "user_id": m.user_id, 
+            "id": m.id,
+            "user_id": m.user_id,
             "owner_email": u.email,
-            "mill_id": m.mill_id, 
-            "api_key": m.api_key, 
+            "mill_id": m.mill_id,
+            "api_key": m.api_key,
             "has_baseline": m.has_uploaded_baseline,
-            "created_at": m.created_at
-        } for m, u in mills_with_users
+            "admin_id": m.admin_id,
+            "created_at": m.created_at,
+        }
+        for m, u in result.all()
     ]
 
-@router.post("/mills")
-async def create_mill(mill: MillCreate, admin: User = Depends(get_current_admin_user), db: AsyncSession = Depends(get_db)):
-    """Add a new mill for an existing user."""
-    user_id = mill.user_id
-    if not user_id and mill.email:
-        result = await db.execute(select(User).where(User.email == mill.email))
-        user = result.scalars().first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        user_id = user.id
-    
-    if not user_id:
-        raise HTTPException(status_code=400, detail="Either user_id or email must be provided")
 
-    # check if mill_id already exists for this user or globally?
-    # Usually mill_id is unique per mill.
-    
+@router.post("/mills")
+async def create_mill(
+    mill: MillCreate,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a mill.
+    Mill admin: mill is always created under themselves (admin_id = self).
+    Superadmin: can assign to any user_id / email; admin_id stays as superadmin.
+    """
+    if _is_superadmin(admin):
+        # Superadmin can target any user
+        target_user_id = mill.user_id
+        if not target_user_id and mill.email:
+            res = await db.execute(select(User).where(User.email == mill.email))
+            u = res.scalars().first()
+            if not u:
+                raise HTTPException(status_code=404, detail="User not found")
+            target_user_id = u.id
+        if not target_user_id:
+            raise HTTPException(status_code=400, detail="Provide user_id or email")
+    else:
+        # Mill admin always owns their own mills; ignore any user_id in payload
+        target_user_id = admin.id
+
     api_key = f"fsa_{mill.mill_id}_{secrets.token_hex(16)}"
     new_mill = Mill(
-        user_id=user_id,
+        user_id=target_user_id,
+        admin_id=admin.id,
         mill_id=mill.mill_id,
-        api_key=api_key
+        api_key=api_key,
     )
     db.add(new_mill)
     await db.commit()
     await db.refresh(new_mill)
     return {"status": "success", "mill_id": new_mill.id, "api_key": api_key}
 
+
+# ── tasks & uploads ───────────────────────────────────────────────────────────
+
 @router.get("/tasks")
 async def list_tasks(
     status: Optional[ProcessingStatus] = None,
     mill_id: Optional[str] = None,
-    admin: User = Depends(get_current_admin_user), 
-    db: AsyncSession = Depends(get_db)
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """View all background processing tasks."""
+    """Processing task queue, scoped to the calling admin's mills."""
     from app.models.mill_data import ProcessingTask
+
     query = select(ProcessingTask)
+
+    if not _is_superadmin(admin):
+        # Get mill_ids this admin owns
+        admin_mill_ids_q = select(Mill.mill_id).where(Mill.admin_id == admin.id)
+        admin_mill_ids = (await db.execute(admin_mill_ids_q)).scalars().all()
+        query = query.where(ProcessingTask.mill_id.in_(admin_mill_ids))
+
     if status:
         query = query.where(ProcessingTask.status == status)
     if mill_id:
         query = query.where(ProcessingTask.mill_id == mill_id)
-        
+
     result = await db.execute(query.order_by(ProcessingTask.created_at.desc()))
-    tasks = result.scalars().all()
-    return tasks
+    return result.scalars().all()
+
 
 @router.get("/uploads")
-async def global_upload_history(admin: User = Depends(get_current_admin_user), db: AsyncSession = Depends(get_db)):
-    """View platform-wide upload history."""
-    result = await db.execute(select(RawFile).order_by(RawFile.upload_timestamp.desc()).limit(100))
-    history = result.scalars().all()
+async def global_upload_history(
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload history, scoped to the calling admin's mills."""
+    query = select(RawFile).order_by(RawFile.upload_timestamp.desc()).limit(100)
+
+    if not _is_superadmin(admin):
+        admin_mill_ids_q = select(Mill.mill_id).where(Mill.admin_id == admin.id)
+        admin_mill_ids = (await db.execute(admin_mill_ids_q)).scalars().all()
+        query = select(RawFile).where(
+            RawFile.mill_id.in_(admin_mill_ids)
+        ).order_by(RawFile.upload_timestamp.desc()).limit(100)
+
+    result = await db.execute(query)
     return [
         {
             "mill_id": h.mill_id,
             "filename": h.filename,
             "timestamp": h.upload_timestamp,
-            "status": h.status
-        } for h in history
+            "status": h.status,
+        }
+        for h in result.scalars().all()
     ]
+
 
 @router.put("/stats/{stats_id}")
 async def correct_machine_stats(
-    stats_id: int, 
-    update_data: StatsUpdate, 
-    admin: User = Depends(get_current_admin_user), 
-    db: AsyncSession = Depends(get_db)
+    stats_id: int,
+    update_data: StatsUpdate,
+    admin: User = Depends(get_current_admin_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    """Manual data correction tool for machine statistics."""
+    """Manual data correction — mill admin may only correct stats for their own mills."""
     from app.models.mill_data import MachineDailyStats
-    result = await db.execute(select(MachineDailyStats).where(MachineDailyStats.id == stats_id))
+
+    result = await db.execute(
+        select(MachineDailyStats).where(MachineDailyStats.id == stats_id)
+    )
     stats = result.scalars().first()
     if not stats:
         raise HTTPException(status_code=404, detail="Stats record not found")
-    
+
+    if not _is_superadmin(admin):
+        # Verify the stats belong to a mill this admin owns
+        mill_res = await db.execute(
+            select(Mill).where(
+                Mill.mill_id == stats.mill_id,
+                Mill.admin_id == admin.id,
+            )
+        )
+        if not mill_res.scalars().first():
+            raise HTTPException(status_code=403, detail="Access denied to this mill's stats")
+
     stats.health_score = update_data.health_score
     stats.bearing_risk = update_data.bearing_risk
-    # LOG the correction in details
     stats.health_score_details = f"MANUALLY CORRECTED: {update_data.message}"
-    
+
     await db.commit()
-    return {"status": "success", "message": f"Stats {stats_id} corrected manually."}
+    return {"status": "success", "message": f"Stats {stats_id} corrected."}

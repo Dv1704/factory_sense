@@ -33,6 +33,8 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-factory_user}:${DB_PASSWORD:-factory_password}@db/${DB_NAME:-factorysense}
       - SECRET_KEY=${SECRET_KEY}
       - ALGORITHM=HS256
+      - SUPERADMIN_EMAIL=${SUPERADMIN_EMAIL}
+      - SUPERADMIN_PASSWORD=${SUPERADMIN_PASSWORD}
     ports:
       - "8000:8000"
     depends_on:

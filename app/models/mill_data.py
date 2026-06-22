@@ -14,6 +14,18 @@ class AlertType(str, enum.Enum):
     WARNING = "WARNING"
     CO2_INCREASE = "CO2_INCREASE"
 
+class AlertStatus(str, enum.Enum):
+    active = "active"
+    acknowledged = "acknowledged"
+    resolved = "resolved"
+
+class ResolutionCategory(str, enum.Enum):
+    hardware_fixed = "hardware_fixed"
+    software_fix = "software_fix"
+    false_alarm = "false_alarm"
+    maintenance = "maintenance"
+    other = "other"
+
 class ProcessingStatus(str, enum.Enum):
     PENDING = "PENDING"
     PROCESSING = "PROCESSING"
@@ -57,13 +69,23 @@ class MachineDailyStats(Base):
     avg_current_A = Column(Float, nullable=True)
     max_current = Column(Float, nullable=True)
     std_current = Column(Float, nullable=True)
-    
+
     # Reference fields for industrial intelligence
     reference_mean = Column(Float, nullable=True)
     reference_std = Column(Float, nullable=True)
     reference_p95 = Column(Float, nullable=True)
-    
+
     health_score_details = Column(String, nullable=True) # JSON string of penalties
+
+    # Data availability / connectivity metrics
+    # data_coverage_hours: sum of capped inter-reading intervals (gaps >2× interval are clipped).
+    # Tells the frontend how many hours of the 24h day we actually received data for.
+    # run_hours <= data_coverage_hours <= 24.0
+    data_coverage_hours = Column(Float, nullable=True)
+    data_availability_pct = Column(Float, nullable=True)   # data_coverage_hours / 24 * 100
+    gap_count = Column(Integer, nullable=True)              # readings where gap > 2× sampling interval
+    max_gap_minutes = Column(Float, nullable=True)          # longest single gap in minutes
+    avg_sampling_interval_minutes = Column(Float, nullable=True)  # normal inter-reading period
 
 class MachineBaseline(Base):
     __tablename__ = "machine_baselines"
@@ -127,7 +149,13 @@ class Alert(Base):
     type = Column(Enum(AlertType), nullable=False)
     message = Column(String, nullable=False)
     timestamp = Column(DateTime(timezone=True), server_default=func.now())
-    is_acknowledged = Column(Boolean, default=False)
+    is_acknowledged = Column(Boolean, default=False)  # kept for backward compat; use `status` instead
+
+    status = Column(String, default=AlertStatus.active, nullable=True)
+    acknowledged_at = Column(DateTime(timezone=True), nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+    resolution_note = Column(String, nullable=True)
+    resolution_category = Column(String, nullable=True)
 
 class ProcessingTask(Base):
     __tablename__ = "processing_tasks"

@@ -132,17 +132,39 @@ async def process_operational_data(
 
             # Sort to calculate accurate durations
             chunk = chunk.sort_values(by=['machine_id', 'timestamp'])
-            
-            # Calculate duration in hours between readings
-            chunk['duration_hours'] = chunk.groupby('machine_id')['timestamp'].diff().dt.total_seconds() / 3600.0
-            
-            # Default first reading of each machine to its own median duration, or 1 minute fallback
-            machine_medians = chunk.groupby('machine_id')['duration_hours'].transform('median')
-            chunk['duration_hours'] = chunk['duration_hours'].fillna(machine_medians)
-            chunk['duration_hours'] = chunk['duration_hours'].fillna(1.0 / 60.0)
-            
-            # Duration for running time only
-            chunk['running_duration_hours'] = np.where(chunk['motor_state'] == 'RUNNING', chunk['duration_hours'], 0.0)
+
+            # Raw inter-reading gap per machine
+            chunk['duration_hours'] = (
+                chunk.groupby('machine_id')['timestamp']
+                .diff().dt.total_seconds() / 3600.0
+            )
+
+            # Compute per-machine sampling interval BEFORE filling NaN, so it reflects
+            # the true cadence rather than the fill value.
+            chunk['sampling_interval_hours'] = (
+                chunk.groupby('machine_id')['duration_hours']
+                .transform(lambda x: float(x.dropna().median()) if x.dropna().size > 0 else 1.0 / 60.0)
+            ).fillna(1.0 / 60.0)
+
+            # Fill first-reading NaN with the machine's own normal interval
+            chunk['duration_hours'] = chunk['duration_hours'].fillna(chunk['sampling_interval_hours'])
+
+            # Flag gap events: any reading whose interval is > 2× the normal cadence.
+            # These represent packet loss, network outage, or machine downtime.
+            chunk['is_gap'] = chunk['duration_hours'] > (chunk['sampling_interval_hours'] * 2.0)
+
+            # For run_hours we cap each reading's contribution at one sampling interval
+            # when a gap is present.  Without this, a 30-minute outage followed by a
+            # RUNNING reading would falsely count 30 minutes as machine runtime.
+            chunk['capped_duration_hours'] = chunk['duration_hours'].where(
+                ~chunk['is_gap'],
+                chunk['sampling_interval_hours']
+            )
+            chunk['running_duration_hours'] = np.where(
+                chunk['motor_state'] == 'RUNNING',
+                chunk['capped_duration_hours'],
+                0.0
+            )
 
             # Calculations
             chunk['power_kw'] = (SQRT3 * V * chunk['current_A'] * PF * EFF) / 1000
@@ -159,8 +181,11 @@ async def process_operational_data(
             for dp in data_points:
                 dp['user_id'] = user_id
                 dp['mill_id'] = mill_id
-                dp.pop('date', None) # Remove extra aggregation column
+                dp.pop('date', None)
                 dp.pop('duration_hours', None)
+                dp.pop('sampling_interval_hours', None)
+                dp.pop('is_gap', None)
+                dp.pop('capped_duration_hours', None)
                 dp.pop('running_duration_hours', None)
                 
             async with db_factory() as db:
@@ -187,7 +212,11 @@ async def process_operational_data(
                     avg_current=('current_A', 'mean'),
                     max_current=('current_A', 'max'),
                     std_current=('current_A', 'std'),
-                    run_hours=('running_duration_hours', 'sum')
+                    run_hours=('running_duration_hours', 'sum'),
+                    data_coverage_hours=('capped_duration_hours', 'sum'),
+                    gap_count=('is_gap', 'sum'),
+                    max_gap_hours=('duration_hours', 'max'),
+                    avg_interval_hours=('sampling_interval_hours', 'median'),
                 ).reset_index()
                 
                 for _, agg_row in agg_df.iterrows():
@@ -228,6 +257,11 @@ async def process_operational_data(
                     stats_res = await db.execute(stats_stmt)
                     stats = stats_res.scalars().first()
                     
+                    new_coverage = float(agg_row['data_coverage_hours'])
+                    new_gap_count = int(agg_row['gap_count'])
+                    new_max_gap_min = float(agg_row['max_gap_hours']) * 60.0
+                    new_interval_min = float(agg_row['avg_interval_hours']) * 60.0
+
                     if stats:
                         stats.total_energy_kwh += float(agg_row['total_kwh'])
                         stats.total_co2_kg += float(agg_row['total_co2'])
@@ -235,17 +269,28 @@ async def process_operational_data(
                         stats.excess_kwh += float(excess_kwh_sum)
                         stats.excess_co2_kg += float(excess_kwh_sum * EF)
                         stats.health_score = (stats.health_score + health_score) / 2
+                        # Accumulate availability metrics
+                        stats.data_coverage_hours = (stats.data_coverage_hours or 0.0) + new_coverage
+                        stats.gap_count = (stats.gap_count or 0) + new_gap_count
+                        stats.max_gap_minutes = max(stats.max_gap_minutes or 0.0, new_max_gap_min)
+                        stats.avg_sampling_interval_minutes = new_interval_min
+                        stats.data_availability_pct = min(100.0, (stats.data_coverage_hours / 24.0) * 100)
                     else:
                         stats = MachineDailyStats(
                             user_id=user_id, date=curr_date, mill_id=mill_id, machine_id=m_id,
-                            total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh, 
-                            excess_kwh=float(excess_kwh_sum), total_co2_kg=float(agg_row['total_co2']), 
-                            excess_co2_kg=float(excess_kwh_sum * EF), bearing_risk=BearingRisk.NORMAL, 
+                            total_energy_kwh=float(agg_row['total_kwh']), baseline_kwh=baseline_kwh,
+                            excess_kwh=float(excess_kwh_sum), total_co2_kg=float(agg_row['total_co2']),
+                            excess_co2_kg=float(excess_kwh_sum * EF), bearing_risk=BearingRisk.NORMAL,
                             health_score=health_score, run_hours=float(agg_row['run_hours']),
                             avg_current_A=float(agg_row['avg_current']), max_current=float(agg_row['max_current']),
                             std_current=float(agg_row['std_current']),
-                            reference_mean=baseline.mean_current, reference_std=baseline.std_current, 
-                            reference_p95=baseline.p95_current, health_score_details=json.dumps(health_details)
+                            reference_mean=baseline.mean_current, reference_std=baseline.std_current,
+                            reference_p95=baseline.p95_current, health_score_details=json.dumps(health_details),
+                            data_coverage_hours=new_coverage,
+                            gap_count=new_gap_count,
+                            max_gap_minutes=new_max_gap_min,
+                            avg_sampling_interval_minutes=new_interval_min,
+                            data_availability_pct=min(100.0, new_coverage / 24.0 * 100),
                         )
                         db.add(stats)
 

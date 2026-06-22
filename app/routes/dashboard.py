@@ -9,7 +9,7 @@ from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.models.user import User, Mill
-from app.models.mill_data import MachineDailyStats, Alert, MachineDataPoint, BearingRisk
+from app.models.mill_data import MachineDailyStats, Alert, AlertStatus, MachineDataPoint, BearingRisk
 from app.routes.data import get_api_key_mill, MACHINE_SPECS
 
 router = APIRouter()
@@ -18,6 +18,13 @@ class ReferenceMetrics(BaseModel):
     baseline_mean: float
     baseline_std: float
     baseline_p95: float
+
+class AvailabilityMetrics(BaseModel):
+    data_coverage_hours: Optional[float]
+    data_availability_pct: Optional[float]   # % of the 24h day we received data for
+    gap_count: Optional[int]                  # readings where gap > 2× sampling interval
+    max_gap_minutes: Optional[float]          # longest single silence period
+    avg_sampling_interval_minutes: Optional[float]
 
 class MachineSummaryResponse(BaseModel):
     machine_id: str
@@ -29,6 +36,7 @@ class MachineSummaryResponse(BaseModel):
     health_score: float
     health_score_breakdown: Dict[str, Any]
     status: str
+    availability: AvailabilityMetrics
 
 class MachineTrendResponse(BaseModel):
     date: date
@@ -37,6 +45,10 @@ class MachineTrendResponse(BaseModel):
     avg_current: float
     run_hours: float
     health_score: float
+    data_coverage_hours: Optional[float]
+    data_availability_pct: Optional[float]
+    gap_count: Optional[int]
+    max_gap_minutes: Optional[float]
     rolling_7d_current: Optional[float]
     rolling_30d_current: Optional[float]
 
@@ -87,10 +99,10 @@ async def get_dashboard_summary(
     result = await db.execute(stats_query)
     stats = result.scalars().all()
 
-    # Query active alerts
+    # Query active alerts (active + acknowledged; excludes resolved)
     alerts_query = select(func.count(Alert.id)).where(
         Alert.user_id == mill.user_id,
-        Alert.is_acknowledged == False
+        Alert.status != AlertStatus.resolved,
     )
     result = await db.execute(alerts_query)
     alerts_count = result.scalar() or 0
@@ -162,7 +174,14 @@ async def get_machines(
             },
             "health_score": round(s.health_score, 1),
             "health_score_breakdown": health_breakdown,
-            "status": status
+            "status": status,
+            "availability": {
+                "data_coverage_hours": round(s.data_coverage_hours, 2) if s.data_coverage_hours is not None else None,
+                "data_availability_pct": round(s.data_availability_pct, 1) if s.data_availability_pct is not None else None,
+                "gap_count": s.gap_count,
+                "max_gap_minutes": round(s.max_gap_minutes, 1) if s.max_gap_minutes is not None else None,
+                "avg_sampling_interval_minutes": round(s.avg_sampling_interval_minutes, 2) if s.avg_sampling_interval_minutes is not None else None,
+            },
         })
     
     return machines
@@ -209,7 +228,11 @@ async def get_machine_trends(
         "carbon_kg": t.total_co2_kg,
         "avg_current": t.avg_current_A or 0.0,
         "run_hours": t.run_hours,
-        "health_score": t.health_score or 0.0
+        "health_score": t.health_score or 0.0,
+        "data_coverage_hours": t.data_coverage_hours,
+        "data_availability_pct": t.data_availability_pct,
+        "gap_count": t.gap_count,
+        "max_gap_minutes": t.max_gap_minutes,
     } for t in trends])
     
     # Calculate rolling averages
@@ -232,8 +255,12 @@ async def get_machine_trends(
             "avg_current": round(row['avg_current'], 2),
             "run_hours": round(row['run_hours'], 2),
             "health_score": round(row['health_score'], 1),
+            "data_coverage_hours": round(row['data_coverage_hours'], 2) if pd.notnull(row['data_coverage_hours']) else None,
+            "data_availability_pct": round(row['data_availability_pct'], 1) if pd.notnull(row['data_availability_pct']) else None,
+            "gap_count": int(row['gap_count']) if pd.notnull(row['gap_count']) else None,
+            "max_gap_minutes": round(row['max_gap_minutes'], 1) if pd.notnull(row['max_gap_minutes']) else None,
             "rolling_7d_current": round(row['rolling_7d_current'], 2) if pd.notnull(row['rolling_7d_current']) else None,
-            "rolling_30d_current": round(row['rolling_30d_current'], 2) if pd.notnull(row['rolling_30d_current']) else None
+            "rolling_30d_current": round(row['rolling_30d_current'], 2) if pd.notnull(row['rolling_30d_current']) else None,
         })
-        
+
     return response

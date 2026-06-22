@@ -5,8 +5,9 @@ import enum
 from app.core.database import Base
 
 class UserRole(str, enum.Enum):
-    admin = "admin"
-    manager = "manager"
+    superadmin = "superadmin"   # app owner only — sees entire platform
+    admin = "admin"             # mill admin — manages their own mills
+    manager = "manager"         # operator — accesses data via API key
 
 class User(Base):
     __tablename__ = "users"
@@ -17,7 +18,11 @@ class User(Base):
     role = Column(Enum(UserRole), default=UserRole.manager, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    mills = relationship("Mill", back_populates="owner", cascade="all, delete-orphan")
+    # Which mill admin created this user (NULL for self-registered admins and superadmin)
+    created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    mills = relationship("Mill", back_populates="owner",
+                         foreign_keys="Mill.user_id", cascade="all, delete-orphan")
 
 class Mill(Base):
     __tablename__ = "mills"
@@ -29,4 +34,9 @@ class Mill(Base):
     has_uploaded_baseline = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    owner = relationship("User", back_populates="mills")
+    # The mill admin account that owns/administers this mill.
+    # user_id = whoever holds the API key (may be a manager).
+    # admin_id = the mill admin who created and is responsible for this mill.
+    admin_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+
+    owner = relationship("User", back_populates="mills", foreign_keys=[user_id])
