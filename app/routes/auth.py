@@ -4,7 +4,7 @@ from sqlalchemy.future import select
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from jose import jwt, JWTError
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
 from datetime import datetime, timedelta
 from typing import Optional
 import secrets
@@ -127,12 +127,17 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     return {"status": "success", "api_key": api_key, "message": "Account created. Save this API key!"}
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 @router.post("/login", response_model=Token)
-async def login(form_data: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == form_data.username))
+async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(User).where(User.email == body.email))
     db_user = result.scalars().first()
 
-    if not db_user or not verify_password(form_data.password, db_user.password_hash):
+    if not db_user or not verify_password(body.password, db_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
