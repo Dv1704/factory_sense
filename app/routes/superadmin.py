@@ -1,8 +1,9 @@
 import time
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func, distinct
@@ -23,6 +24,102 @@ from app.models.mill_data import (
 from app.routes.auth import get_current_superadmin_user
 
 router = APIRouter()
+
+# Every route in this file requires a superadmin JWT (see get_current_superadmin_user).
+AUTH_RESPONSES = {
+    401: {"description": "Missing or invalid JWT"},
+    403: {"description": "Authenticated but not a superadmin"},
+}
+
+
+class SystemMetrics(BaseModel):
+    uptime_seconds: float
+    started_at: str
+    api_avg_latency_ms: float
+    api_p95_latency_ms: float
+    api_total_requests: int
+    api_error_rate_pct: float
+
+
+class PlatformMetrics(BaseModel):
+    total_users: int
+    total_mills: int
+    mills_with_baseline: int
+    total_machines: int
+    active_mills_48h: int
+    inactive_mills_48h: int
+
+
+class MachineHealthDistribution(BaseModel):
+    healthy: int
+    warning: int
+    critical: int
+
+
+class AlertsSummary(BaseModel):
+    total_open: int
+    by_type: Dict[str, int]
+
+
+class ProcessingTasksSummary(BaseModel):
+    pending: int
+    completed_24h: int
+    failed_24h: int
+    stuck: int
+
+
+class DatabaseStatus(BaseModel):
+    status: str
+    latency_ms: float
+
+
+class SentryStatus(BaseModel):
+    status: str
+
+
+class IotGatewayStatus(BaseModel):
+    status: str
+    data_points_last_hour: int
+
+
+class ServiceStatuses(BaseModel):
+    database: DatabaseStatus
+    sentry: SentryStatus
+    iot_gateway: IotGatewayStatus
+
+
+class PlatformHealthResponse(BaseModel):
+    health_score: int
+    health_level: str
+    computed_at: str
+    system: SystemMetrics
+    platform: PlatformMetrics
+    machine_health_distribution: MachineHealthDistribution
+    alerts: AlertsSummary
+    processing_tasks: ProcessingTasksSummary
+    services: ServiceStatuses
+
+
+class MillActivityItem(BaseModel):
+    mill_id: str
+    owner_email: str
+    has_baseline: bool
+    machine_count: int
+    last_data_date: Optional[str] = None
+    days_since_last_data: Optional[int] = None
+    avg_health_score_7d: Optional[float] = None
+    open_alerts: int
+    status: str
+
+
+class AlertOverviewItem(BaseModel):
+    id: int
+    mill_id: Optional[str] = None
+    machine_id: str
+    type: str
+    message: str
+    timestamp: str
+    owner_email: str
 
 
 def _compute_health_score(
@@ -78,7 +175,12 @@ def _compute_health_score(
     return score, level
 
 
-@router.get("/health", summary="Platform Health Dashboard")
+@router.get(
+    "/health",
+    summary="Platform Health Dashboard",
+    response_model=PlatformHealthResponse,
+    responses=AUTH_RESPONSES,
+)
 async def get_platform_health(
     admin: User = Depends(get_current_superadmin_user),
     db: AsyncSession = Depends(get_db),
@@ -280,7 +382,12 @@ async def get_platform_health(
     }
 
 
-@router.get("/mills/activity", summary="Per-Mill Data Activity Report")
+@router.get(
+    "/mills/activity",
+    summary="Per-Mill Data Activity Report",
+    response_model=List[MillActivityItem],
+    responses=AUTH_RESPONSES,
+)
 async def get_mill_activity(
     admin: User = Depends(get_current_superadmin_user),
     db: AsyncSession = Depends(get_db),
@@ -364,7 +471,12 @@ async def get_mill_activity(
     return activity
 
 
-@router.get("/alerts/overview", summary="Platform-Wide Open Alerts")
+@router.get(
+    "/alerts/overview",
+    summary="Platform-Wide Open Alerts",
+    response_model=List[AlertOverviewItem],
+    responses=AUTH_RESPONSES,
+)
 async def get_alerts_overview(
     admin: User = Depends(get_current_superadmin_user),
     db: AsyncSession = Depends(get_db),
