@@ -59,7 +59,7 @@ class DashboardSummaryResponse(BaseModel):
     active_alerts_count: int
     date: Optional[date]
 
-@router.get("/machine-specs")
+@router.get("/machine-specs", response_model=Dict[str, Dict[str, str]])
 async def get_machine_specs(
     x_api_key: str = Header(...),
     db: AsyncSession = Depends(get_db)
@@ -88,7 +88,8 @@ async def get_dashboard_summary(
             "total_energy_kwh": 0,
             "total_co2_kg": 0,
             "machine_count": 0,
-            "active_alerts_count": 0
+            "active_alerts_count": 0,
+            "date": None,
         }
 
     # Query stats for the given date

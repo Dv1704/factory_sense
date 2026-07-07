@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel, EmailStr
@@ -6,7 +6,7 @@ from passlib.context import CryptContext
 from jose import jwt, JWTError
 from fastapi.security import OAuth2PasswordBearer
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 import secrets
 
 from app.core.database import get_db
@@ -34,6 +34,33 @@ class Token(BaseModel):
     token_type: str
     api_key: Optional[str] = None
     mill_id: Optional[str] = None
+
+
+class LoginRequest(BaseModel):
+    """Documentation-only model for Swagger — the route itself still accepts
+    either JSON (this shape) or OAuth2 form-encoded fields for compatibility
+    with Swagger's built-in Authorize flow."""
+    email: EmailStr
+    password: str
+
+
+class LogoutResponse(BaseModel):
+    status: str
+    message: str
+
+
+class MillInfo(BaseModel):
+    mill_id: str
+    api_key: str
+    has_baseline: bool
+
+
+class UserProfile(BaseModel):
+    id: int
+    email: str
+    role: str
+    created_at: datetime
+    mills: List[MillInfo]
 
 
 def verify_password(plain_password, hashed_password):
@@ -127,17 +154,40 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
     return {"status": "success", "api_key": api_key, "message": "Account created. Save this API key!"}
 
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
+@router.post(
+    "/login",
+    response_model=Token,
+    responses={401: {"description": "Incorrect email or password"}},
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": LoginRequest.model_json_schema(),
+                    "example": {"email": "user@example.com", "password": "yourpassword"},
+                }
+            },
+        }
+    },
+)
+async def login(request: Request, db: AsyncSession = Depends(get_db)):
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        body = await request.json()
+        email = body.get("email") or body.get("username")
+        password = body.get("password")
+    else:
+        form = await request.form()
+        email = form.get("email") or form.get("username")
+        password = form.get("password")
 
+    if not email or not password:
+        raise HTTPException(status_code=422, detail="email and password are required")
 
-@router.post("/login", response_model=Token)
-async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == body.email))
+    result = await db.execute(select(User).where(User.email == email))
     db_user = result.scalars().first()
 
-    if not db_user or not verify_password(body.password, db_user.password_hash):
+    if not db_user or not verify_password(password, db_user.password_hash):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -153,7 +203,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
     access_token = create_access_token(
         data={"sub": db_user.email, "mill_id": mill_id, "role": db_user.role.value},
-        expires_delta=access_token_expires,
+        expires_delta=access_token_expires
     )
     return {
         "access_token": access_token,
@@ -163,12 +213,16 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=LogoutResponse)
 async def logout():
     return {"status": "success", "message": "Successfully logged out"}
 
 
-@router.get("/me")
+@router.get(
+    "/me",
+    response_model=UserProfile,
+    responses={401: {"description": "Missing or invalid JWT"}},
+)
 async def read_users_me(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Mill).where(Mill.user_id == current_user.id))
     mills = result.scalars().all()

@@ -1,3 +1,4 @@
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -56,9 +57,69 @@ class StatsUpdate(BaseModel):
     message: str
 
 
+class StatusMessage(BaseModel):
+    status: str
+    message: str
+
+
+class UserListItem(BaseModel):
+    id: int
+    email: str
+    role: str
+    mill_count: int
+    created_at: datetime
+
+
+class CreateUserResponse(BaseModel):
+    status: str
+    user_id: int
+
+
+class MillListItem(BaseModel):
+    id: int
+    user_id: int
+    owner_email: str
+    mill_id: str
+    api_key: str
+    has_baseline: bool
+    admin_id: Optional[int] = None
+    created_at: datetime
+
+
+class CreateMillResponse(BaseModel):
+    status: str
+    mill_id: int
+    api_key: str
+
+
+class ProcessingTaskItem(BaseModel):
+    id: int
+    task_id: str
+    user_id: int
+    mill_id: str
+    filename: str
+    status: ProcessingStatus
+    progress: float
+    message: Optional[str] = None
+    task_type: str
+    records_processed: int
+    total_records: int
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    estimated_seconds_remaining: Optional[float] = None
+
+
+class UploadHistoryItem(BaseModel):
+    mill_id: str
+    filename: str
+    timestamp: datetime
+    status: str
+
+
 # ── users ─────────────────────────────────────────────────────────────────────
 
-@router.get("/users")
+@router.get("/users", response_model=List[UserListItem])
 async def list_users(
     email: Optional[str] = None,
     role: Optional[UserRole] = None,
@@ -97,7 +158,7 @@ async def list_users(
     return enriched
 
 
-@router.post("/users")
+@router.post("/users", response_model=CreateUserResponse)
 async def create_user(
     user: UserCreate,
     admin: User = Depends(get_current_admin_user),
@@ -137,7 +198,11 @@ async def create_user(
     return {"status": "success", "user_id": new_user.id}
 
 
-@router.put("/users/{user_id}/reset-password")
+@router.put(
+    "/users/{user_id}/reset-password",
+    response_model=StatusMessage,
+    responses={404: {"description": "User not found"}, 403: {"description": "Access denied to this user"}},
+)
 async def reset_password(
     user_id: int,
     user_update: UserUpdate,
@@ -158,7 +223,7 @@ async def reset_password(
 
 # ── mills ─────────────────────────────────────────────────────────────────────
 
-@router.get("/mills")
+@router.get("/mills", response_model=List[MillListItem])
 async def list_mills(
     mill_id: Optional[str] = None,
     user_id: Optional[int] = None,
@@ -195,7 +260,7 @@ async def list_mills(
     ]
 
 
-@router.post("/mills")
+@router.post("/mills", response_model=CreateMillResponse)
 async def create_mill(
     mill: MillCreate,
     admin: User = Depends(get_current_admin_user),
@@ -236,7 +301,7 @@ async def create_mill(
 
 # ── tasks & uploads ───────────────────────────────────────────────────────────
 
-@router.get("/tasks")
+@router.get("/tasks", response_model=List[ProcessingTaskItem])
 async def list_tasks(
     status: Optional[ProcessingStatus] = None,
     mill_id: Optional[str] = None,
@@ -263,7 +328,7 @@ async def list_tasks(
     return result.scalars().all()
 
 
-@router.get("/uploads")
+@router.get("/uploads", response_model=List[UploadHistoryItem])
 async def global_upload_history(
     admin: User = Depends(get_current_admin_user),
     db: AsyncSession = Depends(get_db),
@@ -290,7 +355,11 @@ async def global_upload_history(
     ]
 
 
-@router.put("/stats/{stats_id}")
+@router.put(
+    "/stats/{stats_id}",
+    response_model=StatusMessage,
+    responses={404: {"description": "Stats record not found"}, 403: {"description": "Access denied to this mill's stats"}},
+)
 async def correct_machine_stats(
     stats_id: int,
     update_data: StatsUpdate,

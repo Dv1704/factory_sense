@@ -51,6 +51,80 @@ class UploadResponse(BaseModel):
     message: str
     estimated_initial_seconds: float
 
+
+class StatusMessage(BaseModel):
+    status: str
+    message: str
+
+
+class UploadHistoryEntry(BaseModel):
+    filename: str
+    timestamp: datetime
+    status: str
+
+
+class BaselineItem(BaseModel):
+    machine_id: str
+    mean_current: float
+    std_current: float
+    p95_current: float
+    updated_at: datetime
+
+
+class BaselineHistoryItem(BaseModel):
+    machine_id: str
+    mean_current: float
+    std_current: float
+    p95_current: float
+    data_points_count: int
+    update_type: str
+    timestamp: datetime
+
+
+class MachineBaselineHistoryItem(BaseModel):
+    mean_current: float
+    std_current: float
+    p95_current: float
+    data_points_count: int
+    update_type: str
+    timestamp: datetime
+
+
+class ReferenceMetrics(BaseModel):
+    baseline_mean: float
+    baseline_std: float
+    baseline_p95: float
+
+
+class MachineAnalytics(BaseModel):
+    machine_id: str
+    name: str
+    total_co2_kg: float
+    total_energy_kwh: float
+    run_hours: float
+    avg_current_A: float
+    reference_metrics: ReferenceMetrics
+    health_score: float
+    health_score_breakdown: dict
+    bearing_risk: BearingRisk
+    excess_co2_kg: float
+    insights: List[str]
+
+
+class MillSummaryMetrics(BaseModel):
+    total_energy_kwh: float
+    total_co2_kg: float
+    total_excess_co2_kg: float
+    avoidable_cost_usd: float
+
+
+class MillSummaryResponse(BaseModel):
+    mill_id: str
+    db_connected: bool
+    last_updated: str
+    summary_metrics: MillSummaryMetrics
+    machines: List[MachineAnalytics]
+
 # --- Shared Specs ---
 
 MACHINE_SPECS = {
@@ -236,7 +310,7 @@ async def get_task_status(
 
 # --- Data History & Retrieval ---
 
-@router.get("/data/history", summary="View Upload History")
+@router.get("/data/history", summary="View Upload History", response_model=List[UploadHistoryEntry])
 async def get_upload_history(
     mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
@@ -257,7 +331,7 @@ async def get_upload_history(
 
 # --- Baseline Management ---
 
-@router.get("/baseline", summary="List Current Baselines")
+@router.get("/baseline", summary="List Current Baselines", response_model=List[BaselineItem])
 async def get_baselines(
     mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
@@ -274,7 +348,7 @@ async def get_baselines(
         } for b in baselines
     ]
 
-@router.get("/baseline/history", summary="View Global Baseline History")
+@router.get("/baseline/history", summary="View Global Baseline History", response_model=List[BaselineHistoryItem])
 async def get_baseline_history(
     mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
@@ -297,7 +371,11 @@ async def get_baseline_history(
         } for h in history
     ]
 
-@router.get("/baseline/{machine_id}/history", summary="View Machine Baseline History")
+@router.get(
+    "/baseline/{machine_id}/history",
+    summary="View Machine Baseline History",
+    response_model=List[MachineBaselineHistoryItem],
+)
 async def get_machine_baseline_history(
     machine_id: str,
     mill: Mill = Depends(get_api_key_mill),
@@ -323,7 +401,12 @@ async def get_machine_baseline_history(
         } for h in history
     ]
 
-@router.put("/baseline/{machine_id}", summary="[MANUAL OVERRIDE - NO FILE] Update Single Baseline (JSON)")
+@router.put(
+    "/baseline/{machine_id}",
+    summary="[MANUAL OVERRIDE - NO FILE] Update Single Baseline (JSON)",
+    response_model=StatusMessage,
+    responses={404: {"description": "Baseline not found"}},
+)
 async def manual_update_baseline(
     machine_id: str,
     baseline_data: BaselineUpdate,
@@ -347,7 +430,12 @@ async def manual_update_baseline(
     await db.commit()
     return {"status": "success", "message": f"Baseline for {machine_id} updated"}
 
-@router.delete("/baseline/{machine_id}", summary="Delete Machine Baseline")
+@router.delete(
+    "/baseline/{machine_id}",
+    summary="Delete Machine Baseline",
+    response_model=StatusMessage,
+    responses={404: {"description": "Baseline not found"}},
+)
 async def delete_baseline(
     machine_id: str,
     mill: Mill = Depends(get_api_key_mill),
@@ -367,7 +455,7 @@ async def delete_baseline(
     await db.commit()
     return {"status": "success", "message": f"Baseline for {machine_id} deleted"}
 
-@router.delete("/baseline", summary="Delete All Mill Baseline Data")
+@router.delete("/baseline", summary="Delete All Mill Baseline Data", response_model=StatusMessage)
 async def delete_all_baseline(
     mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
@@ -390,7 +478,7 @@ async def delete_all_baseline(
     await db.commit()
     return {"status": "success", "message": "All baseline data for the mill has been deleted"}
 
-@router.delete("/operational", summary="Delete All Mill Operational Data")
+@router.delete("/operational", summary="Delete All Mill Operational Data", response_model=StatusMessage)
 async def delete_all_operational(
     mill: Mill = Depends(get_api_key_mill),
     db: AsyncSession = Depends(get_db)
@@ -417,7 +505,11 @@ async def delete_all_operational(
 
 # --- Analytics Summary ---
 
-@router.get("/mill/{mill_id}/summary", summary="Get Mill Operational Summary")
+@router.get(
+    "/mill/{mill_id}/summary",
+    summary="Get Mill Operational Summary",
+    response_model=MillSummaryResponse,
+)
 async def get_summary(
     mill_id: str, 
     start_date: Optional[date] = None, 

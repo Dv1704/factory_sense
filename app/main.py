@@ -2,6 +2,7 @@ import logging
 import time
 
 from fastapi import FastAPI, Request
+from pydantic import BaseModel
 import sentry_sdk
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -184,6 +185,10 @@ app.include_router(admin.router, prefix="/api/v1/admin", tags=["Admin"])
 app.include_router(superadmin.router, prefix="/api/v1/superadmin", tags=["Superadmin"])
 
 
-@app.get("/")
+class RootResponse(BaseModel):
+    message: str
+
+
+@app.get("/", response_model=RootResponse)
 async def root():
     return {"message": "FactorySenseAI API is running"}

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db
-from app.models.mill_data import Alert, AlertStatus, ResolutionCategory
+from app.models.mill_data import Alert, AlertStatus, AlertType, ResolutionCategory
 from app.routes.data import get_api_key_mill
 
 router = APIRouter()
@@ -22,6 +22,24 @@ class ResolveRequest(BaseModel):
         if not self.resolution_note and not self.resolution_category:
             raise ValueError("Provide at least a resolution_note or resolution_category")
         return self
+
+
+class AlertItem(BaseModel):
+    id: int
+    machine_id: Optional[str] = None
+    type: AlertType
+    message: str
+    timestamp: Optional[datetime] = None
+    status: AlertStatus
+    acknowledged_at: Optional[datetime] = None
+    resolved_at: Optional[datetime] = None
+    resolution_note: Optional[str] = None
+    resolution_category: Optional[str] = None
+
+
+class AlertActionResponse(BaseModel):
+    status: str
+    alert: AlertItem
 
 
 def _alert_dict(a: Alert) -> dict:
@@ -39,12 +57,12 @@ def _alert_dict(a: Alert) -> dict:
     }
 
 
-@router.get("/")
+@router.get("/", response_model=List[AlertItem])
 async def get_alerts(
     x_api_key: str = Header(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Active feed: returns alerts that are not yet resolved (active + acknowledged)."""
+    """Active feed: returns active and acknowledged alerts (everything not resolved)."""
     mill = await get_api_key_mill(x_api_key, db)
 
     result = await db.execute(
@@ -58,7 +76,7 @@ async def get_alerts(
     return [_alert_dict(a) for a in result.scalars().all()]
 
 
-@router.get("/history")
+@router.get("/history", response_model=List[AlertItem])
 async def get_alert_history(
     machine_id: Optional[str] = Query(None),
     limit: int = Query(50, ge=1, le=200),
@@ -81,7 +99,11 @@ async def get_alert_history(
     return [_alert_dict(a) for a in result.scalars().all()]
 
 
-@router.patch("/{alert_id}/acknowledge")
+@router.patch(
+    "/{alert_id}/acknowledge",
+    response_model=AlertActionResponse,
+    responses={404: {"description": "Alert not found"}, 400: {"description": "Cannot acknowledge a resolved alert"}},
+)
 async def acknowledge_alert(
     alert_id: int,
     x_api_key: str = Header(...),
@@ -106,7 +128,11 @@ async def acknowledge_alert(
     return {"status": "success", "alert": _alert_dict(alert)}
 
 
-@router.patch("/{alert_id}/resolve")
+@router.patch(
+    "/{alert_id}/resolve",
+    response_model=AlertActionResponse,
+    responses={404: {"description": "Alert not found"}, 400: {"description": "Alert is already resolved"}},
+)
 async def resolve_alert(
     alert_id: int,
     body: ResolveRequest,
