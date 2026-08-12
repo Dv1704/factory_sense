@@ -192,54 +192,6 @@ async def get_platform_health(db: AsyncSession) -> dict:
     }
 
 
-async def get_mill_activity(db: AsyncSession) -> list:
-    """
-    Lists every registered mill with its last-seen data date, machine count,
-    7-day average health score, and a simple activity status:
-    active (≤1d), stale (2-7d), inactive (>7d), or no_data.
-    Results are sorted most-concerning first.
-    """
-    today = date.today()
-    seven_days_ago = today - timedelta(days=7)
-
-    mills = await mill_repository.list_all_with_owner(db)
-
-    activity = []
-    for mill, user in mills:
-        latest_date = await stats_repository.get_latest_date_for_mill(db, mill.mill_id)
-        machine_count = await stats_repository.count_machines_for_mill(db, mill.mill_id)
-        avg_health = await stats_repository.get_avg_health_score(db, mill.mill_id, seven_days_ago)
-        open_alerts = await alert_repository.count_open(db, mill_id=mill.mill_id)
-
-        if latest_date:
-            days_silent = (today - latest_date).days
-            if days_silent <= 1:
-                status = "active"
-            elif days_silent <= 7:
-                status = "stale"
-            else:
-                status = "inactive"
-        else:
-            days_silent = None
-            status = "no_data"
-
-        activity.append({
-            "mill_id": mill.mill_id,
-            "owner_email": user.email,
-            "has_baseline": mill.has_uploaded_baseline,
-            "machine_count": machine_count,
-            "last_data_date": latest_date.isoformat() if latest_date else None,
-            "days_since_last_data": days_silent,
-            "avg_health_score_7d": round(avg_health, 1) if avg_health is not None else None,
-            "open_alerts": open_alerts,
-            "status": status,
-        })
-
-    status_order = {"no_data": 0, "inactive": 1, "stale": 2, "active": 3}
-    activity.sort(key=lambda x: status_order.get(x["status"], 99))
-    return activity
-
-
 async def get_alerts_overview(db: AsyncSession) -> list:
     """
     Returns all unacknowledged alerts across every mill, enriched with the

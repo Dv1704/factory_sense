@@ -25,10 +25,11 @@ async def get_latest_date_for_user(db: AsyncSession, user_id: int) -> Optional[d
     return result.scalar()
 
 
-async def get_latest_date_for_mill(db: AsyncSession, mill_id: str) -> Optional[date]:
-    result = await db.execute(
-        select(func.max(MachineDailyStats.date)).where(MachineDailyStats.mill_id == mill_id)
-    )
+async def get_latest_date_for_mill(db: AsyncSession, mill_id: str, user_id: Optional[int] = None) -> Optional[date]:
+    query = select(func.max(MachineDailyStats.date)).where(MachineDailyStats.mill_id == mill_id)
+    if user_id is not None:
+        query = query.where(MachineDailyStats.user_id == user_id)
+    result = await db.execute(query)
     return result.scalar()
 
 
@@ -50,6 +51,30 @@ async def get_latest_per_machine(db: AsyncSession, user_id: int):
             & (MachineDailyStats.date == subquery.c.max_date),
         )
         .where(MachineDailyStats.user_id == user_id)
+    )
+    result = await db.execute(query)
+    return result.scalars().all()
+
+
+async def get_latest_per_machine_for_mill(db: AsyncSession, mill_id: str, user_id: int):
+    subquery = (
+        select(
+            MachineDailyStats.machine_id,
+            func.max(MachineDailyStats.date).label("max_date"),
+        )
+        .where(MachineDailyStats.mill_id == mill_id, MachineDailyStats.user_id == user_id)
+        .group_by(MachineDailyStats.machine_id)
+        .subquery()
+    )
+    query = (
+        select(MachineDailyStats)
+        .join(
+            subquery,
+            (MachineDailyStats.machine_id == subquery.c.machine_id)
+            & (MachineDailyStats.date == subquery.c.max_date),
+        )
+        .where(MachineDailyStats.mill_id == mill_id, MachineDailyStats.user_id == user_id)
+        .order_by(MachineDailyStats.machine_id)
     )
     result = await db.execute(query)
     return result.scalars().all()
@@ -91,13 +116,26 @@ async def count_distinct_machines(db: AsyncSession) -> int:
     return result.scalar() or 0
 
 
-async def count_machines_for_mill(db: AsyncSession, mill_id: str) -> int:
-    result = await db.execute(
-        select(func.count(distinct(MachineDailyStats.machine_id))).where(
-            MachineDailyStats.mill_id == mill_id
-        )
+async def count_machines_for_mill(db: AsyncSession, mill_id: str, user_id: Optional[int] = None) -> int:
+    query = select(func.count(distinct(MachineDailyStats.machine_id))).where(
+        MachineDailyStats.mill_id == mill_id
     )
+    if user_id is not None:
+        query = query.where(MachineDailyStats.user_id == user_id)
+    result = await db.execute(query)
     return result.scalar() or 0
+
+
+async def list_machine_ids_for_mill(db: AsyncSession, mill_id: str, user_id: Optional[int] = None) -> list[str]:
+    query = (
+        select(distinct(MachineDailyStats.machine_id))
+        .where(MachineDailyStats.mill_id == mill_id)
+        .order_by(MachineDailyStats.machine_id)
+    )
+    if user_id is not None:
+        query = query.where(MachineDailyStats.user_id == user_id)
+    result = await db.execute(query)
+    return result.scalars().all()
 
 
 async def count_by_bearing_risk_since(db: AsyncSession, risk: BearingRisk, since: date) -> int:
@@ -117,13 +155,14 @@ async def list_active_mill_ids_since(db: AsyncSession, since: date):
     return result.fetchall()
 
 
-async def get_avg_health_score(db: AsyncSession, mill_id: str, since: date) -> Optional[float]:
-    result = await db.execute(
-        select(func.avg(MachineDailyStats.health_score)).where(
-            MachineDailyStats.mill_id == mill_id,
-            MachineDailyStats.date >= since,
-        )
+async def get_avg_health_score(db: AsyncSession, mill_id: str, since: date, user_id: Optional[int] = None) -> Optional[float]:
+    query = select(func.avg(MachineDailyStats.health_score)).where(
+        MachineDailyStats.mill_id == mill_id,
+        MachineDailyStats.date >= since,
     )
+    if user_id is not None:
+        query = query.where(MachineDailyStats.user_id == user_id)
+    result = await db.execute(query)
     return result.scalar()
 
 

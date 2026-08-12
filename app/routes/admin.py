@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
@@ -8,6 +8,7 @@ from typing import List, Optional
 from app.core.database import get_db
 from app.models.user import User, Mill, UserRole
 from app.models.mill_data import RawFile, ProcessingStatus
+from app.repositories import stats_repository, alert_repository
 from app.routes.auth import get_current_admin_user, get_password_hash
 from pydantic import BaseModel, EmailStr
 import secrets
@@ -75,15 +76,34 @@ class CreateUserResponse(BaseModel):
     user_id: int
 
 
+class MachineSummary(BaseModel):
+    machine_id: str
+    health_score: float
+    bearing_risk: str
+    total_co2_kg: float
+    excess_co2_kg: float
+    total_energy_kwh: float
+    excess_kwh: float
+    run_hours: float
+    data_availability_pct: Optional[float] = None
+    last_data_date: date
+    open_alerts: int
+
+
 class MillListItem(BaseModel):
     id: int
     user_id: int
     owner_email: str
     mill_id: str
+    name: Optional[str] = None
     api_key: str
     has_baseline: bool
     admin_id: Optional[int] = None
     created_at: datetime
+    avg_health_score: Optional[float] = None
+    total_co2_kg: float
+    open_alerts: int
+    machines: List[MachineSummary]
 
 
 class CreateMillResponse(BaseModel):
@@ -233,6 +253,12 @@ async def list_mills(
     """
     Superadmin: all mills across all customers.
     Mill admin: only mills they own (admin_id == current user).
+
+    `mill_id` searches both the mill_id tag and the mill name (partial match).
+    Results are grouped by mill: each mill includes an `avg_health_score`,
+    `total_co2_kg`, and `open_alerts` rollup, plus a `machines` list with the
+    latest health score, carbon (CO2), energy, run hours, and open alert
+    count for every machine on that mill.
     """
     query = select(Mill, User).join(User, Mill.user_id == User.id)
 
@@ -240,24 +266,54 @@ async def list_mills(
         query = query.where(Mill.admin_id == admin.id)
 
     if mill_id:
-        query = query.where(Mill.mill_id.contains(mill_id))
+        query = query.where(
+            Mill.mill_id.contains(mill_id) | Mill.name.contains(mill_id)
+        )
     if user_id:
         query = query.where(Mill.user_id == user_id)
 
+    query = query.order_by(Mill.mill_id, Mill.name)
     result = await db.execute(query)
-    return [
-        {
+    rows = result.all()
+
+    output = []
+    for m, u in rows:
+        stats = await stats_repository.get_latest_per_machine_for_mill(db, m.mill_id, m.user_id)
+        alerts_by_machine = await alert_repository.count_open_by_machine(db, user_id=m.user_id, mill_id=m.mill_id)
+
+        machines = [
+            {
+                "machine_id": s.machine_id,
+                "health_score": s.health_score,
+                "bearing_risk": s.bearing_risk.value,
+                "total_co2_kg": s.total_co2_kg,
+                "excess_co2_kg": s.excess_co2_kg,
+                "total_energy_kwh": s.total_energy_kwh,
+                "excess_kwh": s.excess_kwh,
+                "run_hours": s.run_hours,
+                "data_availability_pct": s.data_availability_pct,
+                "last_data_date": s.date,
+                "open_alerts": alerts_by_machine.get(s.machine_id, 0),
+            }
+            for s in stats
+        ]
+
+        output.append({
             "id": m.id,
             "user_id": m.user_id,
             "owner_email": u.email,
             "mill_id": m.mill_id,
+            "name": m.name,
             "api_key": m.api_key,
             "has_baseline": m.has_uploaded_baseline,
             "admin_id": m.admin_id,
             "created_at": m.created_at,
-        }
-        for m, u in result.all()
-    ]
+            "avg_health_score": round(sum(s.health_score for s in stats) / len(stats), 1) if stats else None,
+            "total_co2_kg": sum(s.total_co2_kg for s in stats),
+            "open_alerts": await alert_repository.count_open(db, user_id=m.user_id, mill_id=m.mill_id),
+            "machines": machines,
+        })
+    return output
 
 
 @router.post("/mills", response_model=CreateMillResponse)

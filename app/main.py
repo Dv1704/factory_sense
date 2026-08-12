@@ -69,6 +69,8 @@ app = FastAPI(
 
 origins = [
     "https://stikkverse.vercel.app",
+    "https://stikkverse.app",
+    "https://www.stikkverse.app",
     "http://localhost:3000",
     "http://localhost:5173",
     "http://localhost:5174",

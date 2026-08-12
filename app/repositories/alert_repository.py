@@ -45,6 +45,15 @@ async def count_open(db: AsyncSession, *, user_id: Optional[int] = None,
     return result.scalar() or 0
 
 
+async def count_open_by_machine(db: AsyncSession, *, user_id: int, mill_id: str) -> dict:
+    result = await db.execute(
+        select(Alert.machine_id, func.count(Alert.id))
+        .where(Alert.user_id == user_id, Alert.mill_id == mill_id, Alert.status != AlertStatus.resolved)
+        .group_by(Alert.machine_id)
+    )
+    return dict(result.all())
+
+
 async def get_open_type_breakdown(db: AsyncSession):
     result = await db.execute(
         select(Alert.type, func.count(Alert.id))

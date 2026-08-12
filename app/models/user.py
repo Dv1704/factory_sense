@@ -30,6 +30,7 @@ class Mill(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), index=True, nullable=False)
     mill_id = Column(String, index=True, nullable=False)
+    name = Column(String, nullable=True)
     api_key = Column(String, unique=True, index=True, nullable=True)
     has_uploaded_baseline = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

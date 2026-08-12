@@ -21,6 +21,7 @@ from app.models.mill_data import (
     ProcessingStatus,
     BearingRisk,
 )
+from app.repositories import stats_repository, alert_repository
 from app.routes.auth import get_current_superadmin_user
 
 router = APIRouter()
@@ -100,6 +101,18 @@ class PlatformHealthResponse(BaseModel):
     services: ServiceStatuses
 
 
+class MachineActivityItem(BaseModel):
+    machine_id: str
+    health_score: float
+    bearing_risk: str
+    total_co2_kg: float
+    excess_co2_kg: float
+    total_energy_kwh: float
+    run_hours: float
+    last_data_date: date
+    open_alerts: int
+
+
 class MillActivityItem(BaseModel):
     mill_id: str
     owner_email: str
@@ -110,6 +123,7 @@ class MillActivityItem(BaseModel):
     avg_health_score_7d: Optional[float] = None
     open_alerts: int
     status: str
+    machines: List[MachineActivityItem]
 
 
 class AlertOverviewItem(BaseModel):
@@ -408,10 +422,14 @@ async def get_mill_activity(
 
     activity = []
     for mill, user in mills:
+        # mill_id (the string tag) is not unique across mills, so every query here
+        # must also scope by the mill's actual owner (user_id) to avoid attributing
+        # one client's telemetry to a different client who picked the same tag.
         latest_date = (
             await db.execute(
                 select(func.max(MachineDailyStats.date)).where(
-                    MachineDailyStats.mill_id == mill.mill_id
+                    MachineDailyStats.mill_id == mill.mill_id,
+                    MachineDailyStats.user_id == mill.user_id,
                 )
             )
         ).scalar()
@@ -419,7 +437,8 @@ async def get_mill_activity(
         machine_count = (
             await db.execute(
                 select(func.count(distinct(MachineDailyStats.machine_id))).where(
-                    MachineDailyStats.mill_id == mill.mill_id
+                    MachineDailyStats.mill_id == mill.mill_id,
+                    MachineDailyStats.user_id == mill.user_id,
                 )
             )
         ).scalar() or 0
@@ -428,6 +447,7 @@ async def get_mill_activity(
             await db.execute(
                 select(func.avg(MachineDailyStats.health_score)).where(
                     MachineDailyStats.mill_id == mill.mill_id,
+                    MachineDailyStats.user_id == mill.user_id,
                     MachineDailyStats.date >= seven_days_ago,
                 )
             )
@@ -437,6 +457,7 @@ async def get_mill_activity(
             await db.execute(
                 select(func.count(Alert.id)).where(
                     Alert.mill_id == mill.mill_id,
+                    Alert.user_id == mill.user_id,
                     Alert.status != AlertStatus.resolved,
                 )
             )
@@ -454,6 +475,25 @@ async def get_mill_activity(
             days_silent = None
             status = "no_data"
 
+        machine_stats = await stats_repository.get_latest_per_machine_for_mill(db, mill.mill_id, mill.user_id)
+        alerts_by_machine = await alert_repository.count_open_by_machine(
+            db, user_id=mill.user_id, mill_id=mill.mill_id
+        )
+        machines = [
+            {
+                "machine_id": s.machine_id,
+                "health_score": s.health_score,
+                "bearing_risk": s.bearing_risk.value,
+                "total_co2_kg": s.total_co2_kg,
+                "excess_co2_kg": s.excess_co2_kg,
+                "total_energy_kwh": s.total_energy_kwh,
+                "run_hours": s.run_hours,
+                "last_data_date": s.date,
+                "open_alerts": alerts_by_machine.get(s.machine_id, 0),
+            }
+            for s in machine_stats
+        ]
+
         activity.append({
             "mill_id": mill.mill_id,
             "owner_email": user.email,
@@ -464,6 +504,7 @@ async def get_mill_activity(
             "avg_health_score_7d": round(avg_health, 1) if avg_health is not None else None,
             "open_alerts": open_alerts,
             "status": status,
+            "machines": machines,
         })
 
     status_order = {"no_data": 0, "inactive": 1, "stale": 2, "active": 3}

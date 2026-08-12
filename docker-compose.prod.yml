@@ -8,8 +8,6 @@ services:
       POSTGRES_USER: ${DB_USER:-factory_user}
       POSTGRES_PASSWORD: ${DB_PASSWORD:-factory_password}
       POSTGRES_DB: ${DB_NAME:-factorysense}
-    ports:
-      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
