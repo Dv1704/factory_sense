@@ -355,11 +355,24 @@ async def magic_link(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Passwordless sign-in: emails a one-click login link instead of requiring
-    a password. Same anti-enumeration shape as `/forgot-password` -- always
-    returns the same message. The token is separate from the password-reset
-    token (15 min TTL, single-use) and only ever exchanges for a JWT via
-    `/magic-login`; it can't be used to change the password.
+    Step 1 of passwordless sign-in. Emails a one-click login link instead of
+    requiring a password.
+
+    Flow:
+    1. Client POSTs `{"email": ...}` here.
+    2. If that email has an account, a random 32-byte token
+       (`secrets.token_urlsafe`) is generated and stored on the user row
+       alongside a 15-minute expiry, then queued to the outbox as
+       `https://stikkverse.app/magic-login?token=...`.
+    3. Response is identical either way -- same anti-enumeration shape as
+       `/forgot-password` -- so this endpoint can't be used to test which
+       emails are registered.
+    4. The frontend page at that URL reads `token` from the query string and
+       POSTs it to `/magic-login` (step 2) to actually get signed in.
+
+    This token is a separate column (`magic_link_token`) from the
+    password-reset token, so a leaked magic link can only sign someone in --
+    it can never be used to change the password.
     """
     result = await db.execute(select(User).where(User.email == payload.email))
     db_user = result.scalars().first()
@@ -389,8 +402,17 @@ async def magic_link(
     responses={400: {"description": "Magic link token is invalid, already used, or expired"}},
 )
 async def magic_login(payload: MagicLoginRequest, db: AsyncSession = Depends(get_db)):
-    """Exchange a `/magic-link` token for a JWT, exactly like `/login` but
-    without a password. Single-use: cleared on success."""
+    """
+    Step 2 of passwordless sign-in. Exchanges the token from the `/magic-link`
+    email for a real JWT, exactly like `/login` but with a token instead of a
+    password.
+
+    Looks the user up by `magic_link_token`, rejects with 400 if the token
+    doesn't match any user or its 15-minute expiry has passed, then clears
+    the token before returning the JWT (via the same `_issue_token()` helper
+    `/login` uses) -- so the token is single-use: a second request with the
+    same value gets a 400 instead of a second valid session.
+    """
     result = await db.execute(select(User).where(User.magic_link_token == payload.token))
     db_user = result.scalars().first()
 
