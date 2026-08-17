@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -13,6 +14,8 @@ from app.core.metrics import request_metrics
 from app.routes import auth, data, dashboard, alerts, admin, superadmin
 from app.models.user import User, UserRole
 from app.models.mill_data import RawFile, MachineDailyStats, MachineDataPoint, Alert
+from app.models.email_outbox import EmailOutbox
+from app.services.email_service import dispatch_pending_emails
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +109,12 @@ _NEW_COLUMNS = [
     ("alerts", "resolved_at", "TIMESTAMPTZ"),
     ("alerts", "resolution_note", "TEXT"),
     ("alerts", "resolution_category", "VARCHAR(50)"),
+    # Password reset
+    ("users", "reset_token", "VARCHAR(255)"),
+    ("users", "reset_token_expires", "TIMESTAMPTZ"),
+    # Magic-link login
+    ("users", "magic_link_token", "VARCHAR(255)"),
+    ("users", "magic_link_token_expires", "TIMESTAMPTZ"),
 ]
 
 
@@ -168,13 +177,39 @@ async def _seed_superadmin() -> None:
         logger.info("Superadmin account created: %s", settings.superadmin_email)
 
 
+OUTBOX_SWEEP_INTERVAL_SECONDS = 30
+
+_outbox_sweep_task: "asyncio.Task | None" = None
+
+
+async def _outbox_sweep_loop() -> None:
+    """Safety net for the transactional outbox: catches any row whose immediate
+    post-commit dispatch never ran (process restart, crash) and retries FAILED
+    rows up to MAX_ATTEMPTS."""
+    while True:
+        try:
+            async with AsyncSessionLocal() as db:
+                await dispatch_pending_emails(db)
+        except Exception as exc:
+            logger.warning("Outbox sweep iteration failed: %s", exc)
+        await asyncio.sleep(OUTBOX_SWEEP_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def startup():
+    global _outbox_sweep_task
     await _migrate_enum()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _migrate_columns(conn)
     await _seed_superadmin()
+    _outbox_sweep_task = asyncio.create_task(_outbox_sweep_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    if _outbox_sweep_task:
+        _outbox_sweep_task.cancel()
 
 
 # ── routers ───────────────────────────────────────────────────────────────────

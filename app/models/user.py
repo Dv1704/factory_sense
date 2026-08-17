@@ -21,6 +21,12 @@ class User(Base):
     # Which mill admin created this user (NULL for self-registered admins and superadmin)
     created_by_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
 
+    reset_token = Column(String, nullable=True, index=True)
+    reset_token_expires = Column(DateTime(timezone=True), nullable=True)
+
+    magic_link_token = Column(String, nullable=True, index=True)
+    magic_link_token_expires = Column(DateTime(timezone=True), nullable=True)
+
     mills = relationship("Mill", back_populates="owner",
                          foreign_keys="Mill.user_id", cascade="all, delete-orphan")
 

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel, EmailStr
@@ -9,9 +9,11 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 import secrets
 
-from app.core.database import get_db
+from app.core.database import get_db, AsyncSessionLocal
 from app.models.user import User, Mill, UserRole
 from app.core.config import settings
+from app.services.email_service import queue_email, dispatch_pending_emails
+from app.services.email_templates import welcome_email, password_reset_email, magic_link_email
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -49,6 +51,34 @@ class LogoutResponse(BaseModel):
     message: str
 
 
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str
+    new_password: str
+
+
+class MagicLinkRequest(BaseModel):
+    email: EmailStr
+
+
+class MagicLoginRequest(BaseModel):
+    token: str
+
+
+class StatusResponse(BaseModel):
+    status: str
+    message: str
+
+
+class RegisterResponse(BaseModel):
+    status: str
+    api_key: str
+    message: str
+
+
 class MillInfo(BaseModel):
     mill_id: str
     api_key: str
@@ -71,11 +101,38 @@ def get_password_hash(password):
     return pwd_context.hash(password)
 
 
+async def _dispatch_outbox_now():
+    """Best-effort immediate delivery right after a queueing commit. The
+    periodic sweep in app.main is the safety net if this doesn't run
+    (e.g. the process restarts between the commit and this task firing)."""
+    async with AsyncSessionLocal() as db:
+        await dispatch_pending_emails(db)
+
+
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, settings.secret_key, algorithm=settings.algorithm)
+
+
+async def _issue_token(db: AsyncSession, db_user: User) -> dict:
+    """Shared by /login and /magic-login: look up the user's first mill and mint a JWT."""
+    mill_result = await db.execute(select(Mill).where(Mill.user_id == db_user.id))
+    first_mill = mill_result.scalars().first()
+    api_key = first_mill.api_key if first_mill else None
+    mill_id = first_mill.mill_id if first_mill else "N/A"
+
+    access_token = create_access_token(
+        data={"sub": db_user.email, "mill_id": mill_id, "role": db_user.role.value},
+        expires_delta=timedelta(minutes=settings.access_token_expire_minutes),
+    )
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "api_key": api_key,
+        "mill_id": mill_id,
+    }
 
 
 async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)):
@@ -116,11 +173,24 @@ async def get_current_admin_user(current_user: User = Depends(get_current_user))
     return current_user
 
 
-@router.post("/register", response_model=dict)
-async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
+@router.post(
+    "/register",
+    response_model=RegisterResponse,
+    responses={
+        400: {"description": "Email already registered"},
+        403: {"description": "Superadmin role requested (not allowed via self-registration)"},
+    },
+)
+async def register(user: UserRegister, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """
     Public self-registration — creates a mill admin account with one initial mill.
     Superadmin role cannot be claimed here; it is seeded at server startup via env vars.
+
+    A welcome email (with the API key) is queued to the **transactional outbox**
+    in the same DB transaction as account creation, then delivered in the
+    background. See `app.services.email_service` for the send pattern — the
+    row is durable the moment this call returns 200, independent of whether
+    Resend delivery has actually happened yet.
     """
     if user.role == UserRole.superadmin:
         raise HTTPException(
@@ -148,8 +218,17 @@ async def register(user: UserRegister, db: AsyncSession = Depends(get_db)):
         api_key=api_key,
     )
     db.add(new_mill)
+    await queue_email(
+        db,
+        user.email,
+        "Welcome to StikkVerse",
+        f"Your account is ready. Your API key for mill {user.mill_id}:\n\n{api_key}\n\nKeep it secret -- it authenticates your data uploads.",
+        html=welcome_email(user.mill_id, api_key),
+    )
     await db.commit()
     await db.refresh(new_user)
+
+    background_tasks.add_task(_dispatch_outbox_now)
 
     return {"status": "success", "api_key": api_key, "message": "Account created. Save this API key!"}
 
@@ -194,23 +273,139 @@ async def login(request: Request, db: AsyncSession = Depends(get_db)):
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+    return await _issue_token(db, db_user)
 
-    mill_result = await db.execute(select(Mill).where(Mill.user_id == db_user.id))
-    first_mill = mill_result.scalars().first()
-    api_key = first_mill.api_key if first_mill else None
-    mill_id = first_mill.mill_id if first_mill else "N/A"
 
-    access_token = create_access_token(
-        data={"sub": db_user.email, "mill_id": mill_id, "role": db_user.role.value},
-        expires_delta=access_token_expires
-    )
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "api_key": api_key,
-        "mill_id": mill_id,
-    }
+@router.post(
+    "/forgot-password",
+    response_model=StatusResponse,
+    responses={200: {"description": "Always returned, regardless of whether the email is registered"}},
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Request a password reset link. Always returns the same message whether or
+    not the email is registered, so callers can't use this endpoint to
+    enumerate accounts.
+
+    If the account exists, a single-use token (1 hour TTL) is generated and
+    the reset email is queued to the outbox (same pattern as `/register`)
+    and delivered in the background via Resend.
+    """
+    result = await db.execute(select(User).where(User.email == payload.email))
+    db_user = result.scalars().first()
+
+    if db_user:
+        token = secrets.token_urlsafe(32)
+        db_user.reset_token = token
+        db_user.reset_token_expires = datetime.utcnow() + timedelta(hours=1)
+        reset_link = f"https://stikkverse.app/reset-password?token={token}"
+        await queue_email(
+            db,
+            db_user.email,
+            "Reset your StikkVerse password",
+            f"Use this link to reset your password (valid 1 hour):\n\n{reset_link}\n\n"
+            "If you didn't request this, you can ignore this email.",
+            html=password_reset_email(reset_link),
+        )
+        await db.commit()
+        background_tasks.add_task(_dispatch_outbox_now)
+
+    return {"status": "success", "message": "If that email is registered, a reset link has been sent."}
+
+
+@router.post(
+    "/reset-password",
+    response_model=StatusResponse,
+    responses={400: {"description": "Reset token is invalid, already used, or expired"}},
+)
+async def reset_password(payload: ResetPasswordRequest, db: AsyncSession = Depends(get_db)):
+    """Consume the token from `/forgot-password` and set a new password. The
+    token is single-use: it's cleared on success, so a second request with
+    the same token gets a 400."""
+    result = await db.execute(select(User).where(User.reset_token == payload.token))
+    db_user = result.scalars().first()
+
+    if (
+        not db_user
+        or not db_user.reset_token_expires
+        or db_user.reset_token_expires < datetime.utcnow()
+    ):
+        raise HTTPException(status_code=400, detail="Invalid or expired reset token")
+
+    db_user.password_hash = get_password_hash(payload.new_password)
+    db_user.reset_token = None
+    db_user.reset_token_expires = None
+    await db.commit()
+
+    return {"status": "success", "message": "Password has been reset"}
+
+
+@router.post(
+    "/magic-link",
+    response_model=StatusResponse,
+    responses={200: {"description": "Always returned, regardless of whether the email is registered"}},
+)
+async def magic_link(
+    payload: MagicLinkRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Passwordless sign-in: emails a one-click login link instead of requiring
+    a password. Same anti-enumeration shape as `/forgot-password` -- always
+    returns the same message. The token is separate from the password-reset
+    token (15 min TTL, single-use) and only ever exchanges for a JWT via
+    `/magic-login`; it can't be used to change the password.
+    """
+    result = await db.execute(select(User).where(User.email == payload.email))
+    db_user = result.scalars().first()
+
+    if db_user:
+        token = secrets.token_urlsafe(32)
+        db_user.magic_link_token = token
+        db_user.magic_link_token_expires = datetime.utcnow() + timedelta(minutes=15)
+        login_link = f"https://stikkverse.app/magic-login?token={token}"
+        await queue_email(
+            db,
+            db_user.email,
+            "Your StikkVerse sign-in link",
+            f"Use this link to sign in (valid 15 minutes):\n\n{login_link}\n\n"
+            "If you didn't request this, you can ignore this email.",
+            html=magic_link_email(login_link),
+        )
+        await db.commit()
+        background_tasks.add_task(_dispatch_outbox_now)
+
+    return {"status": "success", "message": "If that email is registered, a sign-in link has been sent."}
+
+
+@router.post(
+    "/magic-login",
+    response_model=Token,
+    responses={400: {"description": "Magic link token is invalid, already used, or expired"}},
+)
+async def magic_login(payload: MagicLoginRequest, db: AsyncSession = Depends(get_db)):
+    """Exchange a `/magic-link` token for a JWT, exactly like `/login` but
+    without a password. Single-use: cleared on success."""
+    result = await db.execute(select(User).where(User.magic_link_token == payload.token))
+    db_user = result.scalars().first()
+
+    if (
+        not db_user
+        or not db_user.magic_link_token_expires
+        or db_user.magic_link_token_expires < datetime.utcnow()
+    ):
+        raise HTTPException(status_code=400, detail="Invalid or expired magic link")
+
+    db_user.magic_link_token = None
+    db_user.magic_link_token_expires = None
+    await db.commit()
+
+    return await _issue_token(db, db_user)
 
 
 @router.post("/logout", response_model=LogoutResponse)

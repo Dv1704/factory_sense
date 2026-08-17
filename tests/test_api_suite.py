@@ -9,6 +9,7 @@ import json
 from app.main import app
 from app.core.database import get_db
 from app.models.user import User, Mill, UserRole
+import app.routes.auth as auth_routes
 from app.models.mill_data import (
     MachineDailyStats, Alert, BearingRisk, AlertType, 
     RawFile, ProcessingTask, ProcessingStatus, MachineBaseline
@@ -77,12 +78,14 @@ class MockDB:
     async def __aexit__(self, *args): pass
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    # avoid a real DB session / Resend call from the background task
+    monkeypatch.setattr(auth_routes, "_dispatch_outbox_now", lambda: None)
     mock_db = MockDB()
-    
+
     async def override_get_db():
         yield mock_db
-        
+
     app.dependency_overrides[get_db] = override_get_db
     with TestClient(app) as c:
         yield c

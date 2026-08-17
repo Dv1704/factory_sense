@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     superadmin_email: Optional[str] = None
     superadmin_password: Optional[str] = None
 
+    resend_api_key: Optional[str] = None
+    email_from: str = "StikkVerse <noreply@stikkverse.app>"
+
     class Config:
         env_file = ".env"
 
