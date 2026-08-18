@@ -115,6 +115,10 @@ _NEW_COLUMNS = [
     # Magic-link login
     ("users", "magic_link_token", "VARCHAR(255)"),
     ("users", "magic_link_token_expires", "TIMESTAMPTZ"),
+    # Email verification
+    ("users", "email_verified", "BOOLEAN DEFAULT FALSE"),
+    ("users", "verification_token", "VARCHAR(255)"),
+    ("users", "verification_token_expires", "TIMESTAMPTZ"),
 ]
 
 

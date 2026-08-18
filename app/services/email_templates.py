@@ -75,6 +75,20 @@ def magic_link_email(login_link: str) -> str:
     )
 
 
+def verification_email(verify_link: str) -> str:
+    body = """
+    <p style="margin:0;">One last step -- confirm this is your email address. This link is
+    valid for 24 hours. If you didn't create a StikkVerse account, you can ignore this email.</p>
+    """
+    return _shell(
+        "Verify your StikkVerse email.",
+        "Verify your email.",
+        body,
+        cta_text="VERIFY EMAIL",
+        cta_url=verify_link,
+    )
+
+
 def password_reset_email(reset_link: str) -> str:
     body = """
     <p style="margin:0;">We received a request to reset your password. This link is valid for

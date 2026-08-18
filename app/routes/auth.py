@@ -13,7 +13,7 @@ from app.core.database import get_db, AsyncSessionLocal
 from app.models.user import User, Mill, UserRole
 from app.core.config import settings
 from app.services.email_service import queue_email, dispatch_pending_emails
-from app.services.email_templates import welcome_email, password_reset_email, magic_link_email
+from app.services.email_templates import welcome_email, password_reset_email, magic_link_email, verification_email
 
 router = APIRouter()
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -65,6 +65,10 @@ class MagicLinkRequest(BaseModel):
 
 
 class MagicLoginRequest(BaseModel):
+    token: str
+
+
+class VerifyEmailRequest(BaseModel):
     token: str
 
 
@@ -225,6 +229,19 @@ async def register(user: UserRegister, background_tasks: BackgroundTasks, db: As
         f"Your account is ready. Your API key for mill {user.mill_id}:\n\n{api_key}\n\nKeep it secret -- it authenticates your data uploads.",
         html=welcome_email(user.mill_id, api_key),
     )
+
+    verify_token = secrets.token_urlsafe(32)
+    new_user.verification_token = verify_token
+    new_user.verification_token_expires = datetime.utcnow() + timedelta(hours=24)
+    verify_link = f"https://stikkverse.app/verify-email?token={verify_token}"
+    await queue_email(
+        db,
+        user.email,
+        "Verify your StikkVerse email",
+        f"Confirm your email address (valid 24 hours):\n\n{verify_link}",
+        html=verification_email(verify_link),
+    )
+
     await db.commit()
     await db.refresh(new_user)
 
@@ -428,6 +445,40 @@ async def magic_login(payload: MagicLoginRequest, db: AsyncSession = Depends(get
     await db.commit()
 
     return await _issue_token(db, db_user)
+
+
+@router.post(
+    "/verify-email",
+    response_model=StatusResponse,
+    responses={400: {"description": "Verification token is invalid, already used, or expired"}},
+)
+async def verify_email(payload: VerifyEmailRequest, db: AsyncSession = Depends(get_db)):
+    """
+    Confirms the link sent by `/register`. Looks the user up by
+    `verification_token`, rejects with 400 if it doesn't match any user or
+    its 24-hour expiry has passed, then sets `email_verified` and clears the
+    token (single-use).
+
+    Registration and login don't currently check `email_verified` -- this
+    only records the confirmation. Add that check wherever it should start
+    being enforced.
+    """
+    result = await db.execute(select(User).where(User.verification_token == payload.token))
+    db_user = result.scalars().first()
+
+    if (
+        not db_user
+        or not db_user.verification_token_expires
+        or db_user.verification_token_expires < datetime.utcnow()
+    ):
+        raise HTTPException(status_code=400, detail="Invalid or expired verification link")
+
+    db_user.email_verified = True
+    db_user.verification_token = None
+    db_user.verification_token_expires = None
+    await db.commit()
+
+    return {"status": "success", "message": "Email verified."}
 
 
 @router.post("/logout", response_model=LogoutResponse)

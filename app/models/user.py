@@ -27,6 +27,10 @@ class User(Base):
     magic_link_token = Column(String, nullable=True, index=True)
     magic_link_token_expires = Column(DateTime(timezone=True), nullable=True)
 
+    email_verified = Column(Boolean, default=False, nullable=False)
+    verification_token = Column(String, nullable=True, index=True)
+    verification_token_expires = Column(DateTime(timezone=True), nullable=True)
+
     mills = relationship("Mill", back_populates="owner",
                          foreign_keys="Mill.user_id", cascade="all, delete-orphan")
 
